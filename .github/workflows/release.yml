@@ -1,0 +1,71 @@
+name: Release
+
+# Fires only on an explicit version tag push (e.g. `git tag v0.1.1 && git
+# push origin v0.1.1`) — never on every commit to main, so a release is
+# always a deliberate act, not a side effect of pushing.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # The tag is the single source of truth for what version is being
+      # released — cross-checked against PfExplorer.csproj below so a
+      # forgotten version bump fails the build instead of silently
+      # publishing a re-tagged duplicate of the last release.
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Verify tag matches PfExplorer.csproj Version
+        shell: pwsh
+        run: |
+          [xml]$csproj = Get-Content PfExplorer.csproj
+          $csprojVersion = $csproj.Project.PropertyGroup.Version
+          if ($csprojVersion -notlike "${{ steps.version.outputs.version }}*") {
+            Write-Error "Tag v${{ steps.version.outputs.version }} does not match PfExplorer.csproj Version ($csprojVersion). Bump the Version in the csproj before tagging."
+            exit 1
+          }
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Update repo.json
+        shell: pwsh
+        run: |
+          $manifest = Get-Content "bin/Release/PfExplorer/PfExplorer.json" -Raw | ConvertFrom-Json
+          $repo = Get-Content "repo.json" -Raw | ConvertFrom-Json
+          $repo[0].AssemblyVersion = $manifest.AssemblyVersion
+          $repo[0].LastUpdate = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $repo | ConvertTo-Json -Depth 10 | Set-Content "repo.json" -Encoding utf8
+
+      - name: Commit updated repo.json
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add repo.json
+          git diff --cached --quiet || git commit -m "repo.json: ${{ github.ref_name }}"
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/Release/PfExplorer/latest.zip
+          generate_release_notes: true
