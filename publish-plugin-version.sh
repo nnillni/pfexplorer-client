@@ -22,13 +22,36 @@ fi
 CSPROJ="PfExplorer.csproj"
 current_version="$(grep -oP '(?<=<Version>)[^<]+' "$CSPROJ")"
 IFS='.' read -r major minor patch _revision <<< "$current_version"
+current_tag="v${current_version%.0}"
 
 echo "Current version: $current_version"
+echo "  0) retrigger — re-run release.yml for $current_tag, no version change"
 echo "Bump:"
 echo "  1) patch  ($major.$minor.$((patch + 1)).0)"
 echo "  2) minor  ($major.$((minor + 1)).0.0)"
 echo "  3) major  ($((major + 1)).0.0.0)"
-read -rp "Choice [1-3]: " bump_choice
+read -rp "Choice [0-3]: " bump_choice
+
+if [[ "$bump_choice" == "0" ]]; then
+  # GitHub's tag-push trigger only fires on an actual push event — pushing
+  # an unchanged existing tag is a no-op, nothing re-runs. Force-deleting
+  # the tag (local + remote) and recreating it at the current HEAD is what
+  # actually produces a new push for CI to react to — and lands it on
+  # whatever's currently committed, so if the last run failed because of a
+  # workflow bug (not the plugin code itself), the fix for that bug — once
+  # committed — comes along for free instead of re-running the exact same
+  # broken workflow that was there when the tag was first pushed.
+  echo
+  echo "Retriggering $current_tag at $(git rev-parse --short HEAD)..."
+  git push origin ":refs/tags/$current_tag" || true
+  git tag -d "$current_tag" 2>/dev/null || true
+  git tag -a "$current_tag" -m "Retrigger"
+  git push origin HEAD:main
+  git push origin "$current_tag"
+  echo
+  echo "Pushed $current_tag again — release.yml will re-run now."
+  exit 0
+fi
 
 case "$bump_choice" in
   1) new_version="$major.$minor.$((patch + 1)).0" ;;

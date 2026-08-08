@@ -21,6 +21,20 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      # Dalamud.NET.Sdk builds against the actual Dalamud binaries, same as
+      # your local dev machine (which has them because XIVLauncher put them
+      # there by actually running the game) — a fresh GitHub-hosted runner
+      # has neither XIVLauncher nor the game, so nothing's ever populated
+      # %APPDATA%\XIVLauncher\addon\Hooks\dev\ here. Downloading goatcorp's
+      # prebuilt "latest" distributable straight into that exact path is the
+      # standard fix every Dalamud plugin's CI does (same as goatcorp's own
+      # SamplePlugin).
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:APPDATA\XIVLauncher\addon\Hooks\dev"
+
       # The tag is the single source of truth for what version is being
       # released — cross-checked against PfExplorer.csproj below so a
       # forgotten version bump fails the build instead of silently
