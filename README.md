@@ -2,11 +2,19 @@
 
 A Dalamud plugin that captures Party Finder listings as you browse them in-game and contributes them to [pfexplorer.com](https://pfexplorer.com), a cross-client Party Finder search site. In return, it can alert you (chat/toast/sound) when a listing matching your job/item level/data center filters appears, even while you're not looking at the in-game Party Finder window.
 
+![Full results window](big-explorer.png)
+![Compact minimal view](mini-explorer.png)
+
 ## Features
 
-- **Capture & contribute** — every PF listing you see in-game (via normal browsing, or an opt-in background scanner that cycles categories for you) is uploaded to pfexplorer.com so other players can search it from the website or their own plugin.
-- **Alerts** — poll pfexplorer.com's aggregated listings and notify you when one matches your configured job, item level range, data center(s), and category.
-- **Results window** — a full or compact in-plugin view of matching listings, with freshness indicators and one-click "open in-game" via the game's own listing popup.
+- **Cross-DC search** — see and filter Party Finder listings from every data center, not just the one you're currently on.
+- **Click to open** — click a listing to jump straight to it in-game; Party Finder opens (or switches) to the right category automatically.
+- **One-click travel** — for a listing on a data center you can actually reach, clicking it (or the dedicated travel icon) prompts a travel confirmation instead of just showing an error (via whatever `/li`-style travel command/plugin you have, e.g. Lifestream).
+- **Notifications** — configurable alerts for new matches, party size changes, and listings closing, each with its own chat color, and clickable straight from the chat line.
+- **Two view modes** — a full results window (icons, description, tags, freshness) or a compact minimal view for glancing at a corner of the screen.
+- **Filters** — job, item level range, data center(s), category, and freshness (how recently a listing was reconfirmed).
+- **Background scanning (opt-in)** — keeps contributing fresh data to pfexplorer.com even when you're not manually browsing Party Finder yourself.
+- **Capture & contribute** — every PF listing you see in-game is uploaded to pfexplorer.com so other players can search it from the website or their own plugin.
 - **Privacy-conscious by default** — private listings (friends/FC only) are never uploaded. Uploads are keyed to a random per-install ID, not your character name or account.
 
 ## Usage

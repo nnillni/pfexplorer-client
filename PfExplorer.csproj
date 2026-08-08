@@ -5,7 +5,7 @@
     <Name>PF Explorer</Name>
     <Author>Nahuel Nillni</Author>
     <Punchline>Captures Party Finder listings and reports them to pfexplorer for cross-client search.</Punchline>
-    <Description>Plugin to contribute on party finder for pfexplorer.com.</Description>
+    <Description>Captures Party Finder listings and shares them to pfexplorer.com for cross-data-center search. Click a listing to jump to it in-game, travel to reach ones on other data centers, and get notified on new matches, party changes, and closures.</Description>
     <PackageProjectUrl>https://pfexplorer.com</PackageProjectUrl>
   </PropertyGroup>
 
