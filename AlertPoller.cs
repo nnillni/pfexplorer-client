@@ -54,23 +54,36 @@ public sealed class AlertPoller : IDisposable
         { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Timer _timer;
 
+    // Keyed by ListingId (the game's own stable Party Finder listing id),
+    // not the server row's numeric Id — that numeric id is NOT stable for
+    // the same real-world listing: server/src/routes/listings.ts's
+    // dedupeListings collapses a plugin-sourced row and an xivpf-sourced
+    // row of the same listing_id onto whichever one it currently prefers
+    // (the plugin's, once one exists), and those are two different DB
+    // rows with two different numeric ids. The instant a plugin capture
+    // for a listing xivpf had already surfaced shows up server-side (e.g.
+    // from opening PF yourself), the numeric id GET /api/listings returns
+    // for that same real listing flips — which, tracked by numeric Id,
+    // looks exactly like "the old one vanished, a new one appeared" and
+    // fired a bogus "changed" then "new" pair for one continuous listing.
+    // ListingId doesn't have this problem — it's the real game id, shared
+    // by both rows.
+    //
     // Null until the first poll completes, so enabling alerts mid-session
     // doesn't flag every match that was already up as "new".
-    private HashSet<int>? _previousMatchingIds;
+    private HashSet<string>? _previousMatchingIds;
 
     // Every listing id that's ever been seen in a matching poll, kept
     // forever (until ResetBaseline) — unlike _previousMatchingIds, entries
     // are never removed just because a listing drops out of one poll's
     // results. Without this, a listing that ages past the freshness
-    // window (or briefly falls out due to a captured_at edge/dedupe race
-    // between a plugin- and xivpf-sourced copy of the same real-world
-    // listing) then gets recaptured looks like a brand new match to
+    // window then gets recaptured looks like a brand new match to
     // _previousMatchingIds and fires a duplicate "new match" notification
     // even though nothing actually changed in-game. This set is the
     // source of truth for "have we already announced this one", separate
     // from NewMatchIds (which stays poll-to-poll and only drives the
     // list's transient "new" highlight).
-    private readonly HashSet<int> _announcedMatchIds = new();
+    private readonly HashSet<string> _announcedMatchIds = new();
 
     // ListingId -> when this suppression expires. Populated by PruneMissing
     // when a complete-page scan confirms a listing is actually gone from PF
@@ -93,7 +106,7 @@ public sealed class AlertPoller : IDisposable
     // Tracked for every match, not just filtered/announced ones, so the
     // diff is always correct regardless of what AlertNotifyOnPartyChange is
     // set to at any given moment.
-    private Dictionary<int, int>? _previousSlotsFilled;
+    private Dictionary<string, int>? _previousSlotsFilled;
 
     // Consecutive polls a previously-matching listing has been absent from
     // the server's response — PollAsync's own "gone" path (low-confidence:
@@ -108,7 +121,7 @@ public sealed class AlertPoller : IDisposable
     // Plugin.OnReceiveListing) resets an id's streak back to 0 the moment
     // anything actually re-observes it, same self-healing idea as
     // _locallyRemovedListingIds above.
-    private readonly Dictionary<int, int> _missingPollStreak = new();
+    private readonly Dictionary<string, int> _missingPollStreak = new();
     private const int MissingPollThreshold = 2;
 
     // Guards against the manual refresh button and the timer firing a poll
@@ -120,7 +133,7 @@ public sealed class AlertPoller : IDisposable
 
     // Listing IDs that weren't in the previous poll's matching set — the
     // window highlights these instead of firing an individual toast per one.
-    public IReadOnlySet<int> NewMatchIds { get; private set; } = new HashSet<int>();
+    public IReadOnlySet<string> NewMatchIds { get; private set; } = new HashSet<string>();
 
     public DateTime? LastPollAt { get; private set; }
 
@@ -303,8 +316,8 @@ public sealed class AlertPoller : IDisposable
             // Snapshotted before Matches gets overwritten below — needed to
             // build a removed-listing announcement (duty/recruiter/world),
             // since that data won't exist in this poll's response anymore.
-            var previousMatchesById = Matches.ToDictionary(l => l.Id);
-            var previousByListingId = Matches.ToDictionary(l => l.ListingId);
+            var previousMatchesById = Matches.ToDictionary(l => l.ListingId);
+            var previousByListingId = previousMatchesById;
             foreach (var listing in listings)
             {
                 if (!previousByListingId.TryGetValue(listing.ListingId, out var previous))
@@ -351,26 +364,26 @@ public sealed class AlertPoller : IDisposable
             {
                 if (respondedListingIds.Contains(previous.ListingId))
                 {
-                    _missingPollStreak.Remove(previous.Id);
+                    _missingPollStreak.Remove(previous.ListingId);
                     continue;
                 }
 
-                var streak = _missingPollStreak.GetValueOrDefault(previous.Id) + 1;
-                _missingPollStreak[previous.Id] = streak;
+                var streak = _missingPollStreak.GetValueOrDefault(previous.ListingId) + 1;
+                _missingPollStreak[previous.ListingId] = streak;
                 var isStale = streak >= MissingPollThreshold && MatchFreshness.Rank(previous.CapturedAt) >= 2;
                 if (!isStale)
                     listings.Add(previous);
             }
 
             var matching = listings.Where(Matches_).ToList();
-            var matchingIds = matching.Select(l => l.Id).ToHashSet();
+            var matchingIds = matching.Select(l => l.ListingId).ToHashSet();
 
             var previousIds = _previousMatchingIds;
             var previousSlots = _previousSlotsFilled;
-            NewMatchIds = previousIds == null ? new HashSet<int>() : matchingIds.Where(id => !previousIds.Contains(id)).ToHashSet();
+            NewMatchIds = previousIds == null ? new HashSet<string>() : matchingIds.Where(id => !previousIds.Contains(id)).ToHashSet();
             Matches = matching;
             _previousMatchingIds = matchingIds;
-            _previousSlotsFilled = matching.ToDictionary(l => l.Id, l => l.SlotsFilled);
+            _previousSlotsFilled = matching.ToDictionary(l => l.ListingId, l => l.SlotsFilled);
             LastPollAt = DateTime.UtcNow;
             LastError = null;
 
@@ -395,7 +408,7 @@ public sealed class AlertPoller : IDisposable
                     // enabling, or a wave of listings posting together)
                     // shouldn't spam a chat line/toast/sound per listing.
                     var newMatches = matching
-                        .Where(l => !_announcedMatchIds.Contains(l.Id))
+                        .Where(l => !_announcedMatchIds.Contains(l.ListingId))
                         .Where(PassesDisplayFilters)
                         .Take(MaxAnnouncementsPerPoll);
 
@@ -409,13 +422,13 @@ public sealed class AlertPoller : IDisposable
                     // new this poll) and whose slot count actually differs
                     // from last time we saw them.
                     var changed = matching
-                        .Where(l => !NewMatchIds.Contains(l.Id))
-                        .Where(l => previousSlots.TryGetValue(l.Id, out var prevFilled) && prevFilled != l.SlotsFilled)
+                        .Where(l => !NewMatchIds.Contains(l.ListingId))
+                        .Where(l => previousSlots.TryGetValue(l.ListingId, out var prevFilled) && prevFilled != l.SlotsFilled)
                         .Where(PassesDisplayFilters)
                         .Take(MaxAnnouncementsPerPoll);
 
                     foreach (var listing in changed)
-                        AnnouncePartyChange(listing, previousSlots[listing.Id]);
+                        AnnouncePartyChange(listing, previousSlots[listing.ListingId]);
                 }
 
                 if (_config.AlertNotifyOnRemoved)
@@ -536,7 +549,7 @@ public sealed class AlertPoller : IDisposable
             // Actually re-observed, from any source (background scan or you
             // browsing PF yourself) — not just "the server still lists it".
             // See _missingPollStreak's doc comment.
-            _missingPollStreak.Remove(match.Id);
+            _missingPollStreak.Remove(match.ListingId);
             updated++;
         }
 
@@ -566,8 +579,8 @@ public sealed class AlertPoller : IDisposable
         if (stale.Count == 0)
             return Array.Empty<string>();
 
-        var staleSet = stale.Select(l => l.Id).ToHashSet();
-        Matches = Matches.Where(l => !staleSet.Contains(l.Id)).ToList();
+        var staleSet = stale.Select(l => l.ListingId).ToHashSet();
+        Matches = Matches.Where(l => !staleSet.Contains(l.ListingId)).ToList();
         _previousMatchingIds?.ExceptWith(staleSet);
         if (_previousSlotsFilled != null)
             foreach (var id in staleSet)
@@ -583,8 +596,7 @@ public sealed class AlertPoller : IDisposable
         // to overrule that until either the grace window elapses or a scan
         // sees it again.
         var expiresAt = DateTime.UtcNow + LocalRemovalGrace;
-        var staleListingIds = stale.Select(l => l.ListingId).ToList();
-        foreach (var listingId in staleListingIds)
+        foreach (var listingId in staleSet)
             _locallyRemovedListingIds[listingId] = expiresAt;
 
         // Instant version of PollAsync's own removed-announcement — this
@@ -600,7 +612,7 @@ public sealed class AlertPoller : IDisposable
                 AnnounceRemoved(listing);
         }
 
-        return staleListingIds;
+        return staleSet.ToList();
     }
 
     private bool Matches_(PfListingSearchResult listing)

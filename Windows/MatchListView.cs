@@ -326,6 +326,11 @@ public class MatchListView : IDisposable
         // duty (+ description/tags stacked within just that cell), world/DC/
         // recruiter, and the travel button all sit side by side per row,
         // same left-to-right reading order as the website's listing rows.
+        // BordersInnerH alone renders too faint against the freshness row
+        // tint to actually read as a separator — pushed to a more visible
+        // (still subtle) gray below so rows are clearly delimited.
+        ImGui.PushStyleColor(ImGuiCol.TableBorderLight, new Vector4(1f, 1f, 1f, 0.16f));
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f));
         if (ImGui.BeginTable("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
         {
             // Wide enough for two 22x22 icons + gap (Blue Mage rows) as well
@@ -340,24 +345,28 @@ public class MatchListView : IDisposable
 
             ImGui.EndTable();
         }
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor();
 
         ImGui.EndChild();
     }
 
     private void DrawMatchRow(PfListingSearchResult listing)
     {
-        var isNew = _alertPoller.NewMatchIds.Contains(listing.Id);
+        var isNew = _alertPoller.NewMatchIds.Contains(listing.ListingId);
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
-        // Rather than hand-rolling a whole-row hit rect (which turned out
-        // fragile — table cell clip rects and per-row height tracking both
-        // fought back), just hook click-to-open onto every individual
-        // widget in the row via ImGui's own per-item hover/click tracking,
-        // which handles all of that correctly on its own. Covers icon,
-        // duty name, description, and world/recruiter — i.e. everything
-        // except the dedicated Travel button and the small gaps around the
-        // slot squares/tags, which reads as "the whole row" in practice.
-        void HandleRowItemClick()
+        // Each column's content is wrapped in Begin/EndGroup so the whole
+        // column — every line plus the gaps between them, not just the
+        // exact pixels of a specific icon/text widget — acts as a single
+        // hoverable/clickable region via one IsItemHovered/IsItemClicked
+        // check right after EndGroup (a documented ImGui pattern for
+        // treating a widget cluster as one item). A true single hit-rect
+        // for the entire row, spanning column boundaries too, was tried
+        // before and turned out fragile against this table's per-row
+        // variable height; per-column groups get the same "click anywhere
+        // you're reading" result without that risk.
+        void HandleColumnClick()
         {
             if (!ImGui.IsItemHovered())
                 return;
@@ -371,14 +380,17 @@ public class MatchListView : IDisposable
         ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt))));
 
         ImGui.TableNextColumn();
+        ImGui.BeginGroup();
         var isDualIcon = MatchCategorizer.CategoryBucket(listing) == "BlueMage" && listing.Category != "BlueMage";
-        DrawCategoryIcons(listing, isDualIcon ? 22 : 32, HandleRowItemClick);
+        DrawCategoryIcons(listing, isDualIcon ? 22 : 32, static () => { });
+        ImGui.EndGroup();
+        HandleColumnClick();
 
         ImGui.TableNextColumn();
+        ImGui.BeginGroup();
         if (isNew)
             ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
         ImGui.TextUnformatted(dutyName);
-        HandleRowItemClick();
         if (isNew)
         {
             ImGui.PopStyleColor();
@@ -387,10 +399,7 @@ public class MatchListView : IDisposable
         }
 
         if (!_config.AlertHideDescription && !string.IsNullOrEmpty(listing.Description))
-        {
             ImGui.TextWrapped(listing.Description);
-            HandleRowItemClick();
-        }
 
         DrawSlots(listing);
 
@@ -408,14 +417,17 @@ public class MatchListView : IDisposable
             ImGui.TextUnformatted($"[{meta.Label}]");
             ImGui.PopStyleColor();
         }
+        ImGui.EndGroup();
+        HandleColumnClick();
 
         ImGui.TableNextColumn();
+        ImGui.BeginGroup();
         ImGui.PushStyleColor(ImGuiCol.Text, Vector4.One);
         ImGui.TextWrapped($"{listing.Name} ({listing.World})");
-        HandleRowItemClick();
         ImGui.PopStyleColor();
         ImGui.TextDisabled(FormatLastUpdated(listing.CapturedAt));
-        HandleRowItemClick();
+        ImGui.EndGroup();
+        HandleColumnClick();
 
         ImGui.TableNextColumn();
         // No point offering to travel to the DC you're already standing in.
@@ -429,7 +441,8 @@ public class MatchListView : IDisposable
             // reachable regardless of where you're currently standing.
             var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
             var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
-            var canTravel = targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion);
+            var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
+                && PfBackgroundScraper.IsInOpenWorld;
 
             // Icon-only instead of a "Travel" text label — the column was
             // mostly empty space around that one word; the tooltip covers
@@ -447,6 +460,8 @@ public class MatchListView : IDisposable
                 string tooltip;
                 if (canTravel)
                     tooltip = $"Travel to {listing.DataCenter}";
+                else if (!PfBackgroundScraper.IsInOpenWorld)
+                    tooltip = "Can't travel right now — only available out in the open world";
                 else if (targetRegion == null)
                     // A data center we don't recognize at all (not in
                     // DataCenterRegions.All) — no region to explain, so
@@ -747,35 +762,61 @@ public class MatchListView : IDisposable
     {
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
-        void HandleClick()
-        {
-            if (!ImGui.IsItemHovered())
-                return;
-
-            ImGui.SetTooltip("Click to view in-game");
-            if (ImGui.IsItemClicked())
-                PfListingOpener.Open(listing);
-        }
-
         // Same green/yellow/red freshness tint as the normal table rows
         // (FreshnessBg) — painted manually since minimal mode isn't a table
         // here (no TableSetBgColor to lean on), sized to cover the 22px
         // icon plus a little breathing room.
         var rowHeight = Math.Max(22f, ImGui.GetTextLineHeight()) + 4f;
         var rowStart = ImGui.GetCursorScreenPos();
-        var rowEnd = new Vector2(rowStart.X + ImGui.GetContentRegionAvail().X, rowStart.Y + rowHeight);
+        var rowWidth = ImGui.GetContentRegionAvail().X;
+        var rowEnd = new Vector2(rowStart.X + rowWidth, rowStart.Y + rowHeight);
         ImGui.GetWindowDrawList().AddRectFilled(rowStart, rowEnd, ImGui.GetColorU32(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt))));
 
-        DrawCategoryIcons(listing, 22, HandleClick);
+        // A real full-row hit target, not per-widget — this row (unlike the
+        // full table's) is a single fixed-height line, so its bounds are
+        // known upfront: draw an invisible Selectable spanning the whole
+        // row, then reset the cursor back to rowStart so the actual icon/
+        // text content draws on top of it in the same space. Nothing drawn
+        // afterward (Image/Text) is itself interactive, so there's no
+        // overlap conflict to resolve.
+        // Same "do I need to travel, and can I" logic as the full table's
+        // dedicated Travel button/column — used below for an icon rather
+        // than a separate clickable button, since the whole row already
+        // triggers PfListingOpener.Open (which itself prompts/errors on
+        // travel as needed — see PfListingOpener.Open) regardless of where
+        // on the row you click.
+        var alreadyThere = _localDataCenter != null
+            && string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
+        var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
+        var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
+        var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
+            && PfBackgroundScraper.IsInOpenWorld;
+        var needsTravel = !alreadyThere;
+
+        ImGui.SetCursorScreenPos(rowStart);
+        var rowClicked = ImGui.Selectable($"##row-{listing.Id}", false, ImGuiSelectableFlags.None, new Vector2(rowWidth, rowHeight));
+        if (ImGui.IsItemHovered())
+        {
+            string tooltip;
+            if (!needsTravel)
+                tooltip = "Click to view in-game";
+            else if (canTravel)
+                tooltip = $"Click to travel to {listing.DataCenter} to view in-game";
+            else if (!PfBackgroundScraper.IsInOpenWorld)
+                tooltip = "Can't travel right now — only available out in the open world";
+            else
+                tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion ?? "unknown"}), and only Oceania allows cross-region travel";
+            ImGui.SetTooltip(tooltip);
+        }
+        ImGui.SetCursorScreenPos(rowStart);
+
+        DrawCategoryIcons(listing, 22, static () => { });
         ImGui.SameLine(0, 4);
         ImGui.TextDisabled($"({listing.SlotsFilled}/{listing.SlotsAvailable})");
-        HandleClick();
         ImGui.SameLine();
         ImGui.TextUnformatted(dutyName);
-        HandleClick();
         ImGui.SameLine();
         ImGui.TextDisabled($"{listing.World} ({listing.DataCenter})");
-        HandleClick();
         ImGui.SameLine();
         // Compact "1m"/"30m"/"1h20m" style (FormatElapsed, already used for
         // the refresh countdown) rather than normal mode's "Updated Xm ago"
@@ -784,7 +825,37 @@ public class MatchListView : IDisposable
         // under a minute just reads "0m" instead of e.g. "45s".
         var elapsed = ElapsedSince(listing.CapturedAt);
         ImGui.TextDisabled(elapsed.TotalMinutes < 1 ? "0m" : FormatElapsed(elapsed));
-        HandleClick();
+
+        if (needsTravel)
+        {
+            // Right-aligned, plain icon (not a button) — a visual "you'll
+            // need to travel for this one" flag, not a second click target;
+            // the row itself already handles the click. Dimmed when travel
+            // isn't even possible, same distinction the full table's
+            // disabled Travel button makes.
+            ImGui.SameLine(rowWidth - 18);
+            ImGui.PushStyleColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f));
+            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
+            ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
+            ImGui.PopFont();
+            ImGui.PopStyleColor();
+        }
+
+        if (rowClicked)
+            PfListingOpener.Open(listing);
+
+        // A thin separator at the row's bottom edge — minimal mode has no
+        // table to lean on BordersInnerH from, so this is drawn by hand,
+        // same draw list/rect approach as the freshness tint above.
+        ImGui.GetWindowDrawList().AddLine(
+            new Vector2(rowStart.X, rowEnd.Y), new Vector2(rowEnd.X, rowEnd.Y),
+            ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.12f)));
+
+        // Content drawn after resetting the cursor back to rowStart left it
+        // wherever the last SameLine chain ended, not at the row's actual
+        // bottom — explicitly advance past the row (matching the Selectable's
+        // own height) so the next row starts in the right place.
+        ImGui.SetCursorScreenPos(new Vector2(rowStart.X, rowEnd.Y + 1));
     }
 
     private static TimeSpan ElapsedSince(string capturedAt)

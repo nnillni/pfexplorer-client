@@ -183,26 +183,30 @@ public sealed class PfBackgroundScraper
     // Pumped from Plugin's Draw hook every frame — cheap when idle (a
     // couple of date/pointer checks), so safe to call unconditionally
     // rather than needing its own timer/thread.
+    // Party Finder itself is unreachable while logged out, inside a duty
+    // instance, or between zones/cutscenes — RequestCategoryListings still
+    // "succeeds" in those states, it just never yields ReceiveListing
+    // calls. Shared with PfListingOpener, which uses the exact same
+    // condition to gate manual open/travel clicks — one definition of
+    // "actually in the open world right now" instead of two that could
+    // silently drift apart.
+    public static bool IsInOpenWorld =>
+        Plugin.ClientState.IsLoggedIn
+        && !Plugin.Condition[ConditionFlag.BoundByDuty]
+        && !Plugin.Condition[ConditionFlag.BoundByDuty56]
+        && !Plugin.Condition[ConditionFlag.BoundByDuty95]
+        && !Plugin.Condition[ConditionFlag.BetweenAreas]
+        && !Plugin.Condition[ConditionFlag.BetweenAreas51]
+        && !Plugin.Condition[ConditionFlag.WatchingCutscene]
+        && !Plugin.Condition[ConditionFlag.WatchingCutscene78]
+        && !Plugin.Condition[ConditionFlag.OccupiedInCutSceneEvent];
+
     public unsafe void Tick()
     {
         if (!_config.AlertBackgroundScraperEnabled)
             return;
 
-        // Party Finder itself is unreachable while logged out, mid-duty, or
-        // between zones/cutscenes — RequestCategoryListings still "succeeds"
-        // in those states, it just never yields ReceiveListing calls, so
-        // skip requesting until the game would actually let you open PF.
-        if (!Plugin.ClientState.IsLoggedIn)
-            return;
-
-        if (Plugin.Condition[ConditionFlag.BoundByDuty]
-            || Plugin.Condition[ConditionFlag.BoundByDuty56]
-            || Plugin.Condition[ConditionFlag.BoundByDuty95]
-            || Plugin.Condition[ConditionFlag.BetweenAreas]
-            || Plugin.Condition[ConditionFlag.BetweenAreas51]
-            || Plugin.Condition[ConditionFlag.WatchingCutscene]
-            || Plugin.Condition[ConditionFlag.WatchingCutscene78]
-            || Plugin.Condition[ConditionFlag.OccupiedInCutSceneEvent])
+        if (!IsInOpenWorld)
             return;
 
         // Never touch the agent while the player has PF open themselves —

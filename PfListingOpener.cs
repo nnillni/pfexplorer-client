@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using PfExplorer.Models;
@@ -34,12 +35,31 @@ public static class PfListingOpener
     // asking and the other still firing instantly.
     public static void RequestTravel(string dataCenter, string world)
     {
+        // The World Visit System (and whatever "/li" is bound to) isn't
+        // usable mid-duty/zoning/cutscene any more than the PF window
+        // itself is — see PfBackgroundScraper.IsInOpenWorld. Checked here
+        // too, not just in Open below, since MatchListView's Travel button
+        // calls this directly without going through Open.
+        if (!PfBackgroundScraper.IsInOpenWorld)
+        {
+            Plugin.ToastGui.ShowError("Can't travel right now — only available out in the open world.");
+            return;
+        }
+
         _pendingTravel = (dataCenter, world);
         _travelPopupNeedsOpen = true;
     }
 
     public static unsafe void Open(PfListingSearchResult listing)
     {
+        // Same reasoning as RequestTravel above — opening the native PF
+        // window isn't meaningful mid-duty/zoning/cutscene either.
+        if (!PfBackgroundScraper.IsInOpenWorld)
+        {
+            Plugin.ToastGui.ShowError("Can't open Party Finder right now — only available out in the open world.");
+            return;
+        }
+
         // Checked before touching the agent at all — Party Finder only ever
         // shows your own data center's listings, so there's nothing useful
         // to open here. Not opening the window at all (rather than opening
@@ -111,6 +131,15 @@ public static class PfListingOpener
     {
         if (_travelPopupNeedsOpen)
         {
+            // Captured here rather than at the actual click (RequestTravel/
+            // Open) — this runs on the very next Draw after that click, in
+            // the same frame in the row-click case, so the mouse hasn't
+            // meaningfully moved, and this is guaranteed to run inside an
+            // active ImGui frame (see this method's own doc comment) where
+            // a chat link's click callback isn't. Offset right/down a
+            // little so the popup doesn't open directly under the cursor.
+            var clickPos = ImGui.GetMousePos();
+            ImGui.SetNextWindowPos(new Vector2(clickPos.X + 12, clickPos.Y + 8));
             ImGui.OpenPopup(TravelPopupId);
             _travelPopupNeedsOpen = false;
         }
@@ -118,7 +147,13 @@ public static class PfListingOpener
         if (_pendingTravel is not { } pending)
             return;
 
-        if (ImGui.BeginPopupModal(TravelPopupId, ImGuiWindowFlags.AlwaysAutoResize))
+        // A regular (non-modal) popup, not BeginPopupModal — a modal centers
+        // itself and dims the whole screen behind it regardless of
+        // SetNextWindowPos, which read as "fullscreen" for something this
+        // small; a plain popup stays where it's placed, has no dimming, and
+        // closes on its own if you click elsewhere instead of needing an
+        // explicit Cancel.
+        if (ImGui.BeginPopup(TravelPopupId, ImGuiWindowFlags.AlwaysAutoResize))
         {
             ImGui.TextUnformatted($"Travel to {pending.World} ({pending.DataCenter}) to see this party?");
             ImGui.Spacing();
