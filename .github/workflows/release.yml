@@ -64,10 +64,19 @@ jobs:
         shell: pwsh
         run: |
           $manifest = Get-Content "bin/Release/PfExplorer/PfExplorer.json" -Raw | ConvertFrom-Json
+          # ConvertFrom-Json collapses a single-element JSON array into a
+          # bare PSCustomObject (a PowerShell quirk) — $repo[0] still
+          # "works" afterward thanks to a *different* PowerShell quirk that
+          # wraps any scalar for indexing, which is exactly what let this
+          # silently ship broken for a while: ConvertTo-Json on that same
+          # already-collapsed object then serializes back out as a bare
+          # object too, stripping the array brackets Dalamud's repo format
+          # requires ([{...}], not {...}) on every single run. -AsArray
+          # forces array output regardless of element count.
           $repo = Get-Content "repo.json" -Raw | ConvertFrom-Json
           $repo[0].AssemblyVersion = $manifest.AssemblyVersion
           $repo[0].LastUpdate = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-          $repo | ConvertTo-Json -Depth 10 | Set-Content "repo.json" -Encoding utf8
+          $repo | ConvertTo-Json -Depth 10 -AsArray | Set-Content "repo.json" -Encoding utf8
 
       - name: Commit updated repo.json
         shell: bash
