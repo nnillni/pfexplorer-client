@@ -1,0 +1,17 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Version>0.1.0.0</Version>
+    <Name>PF Explorer</Name>
+    <Author>Nahuel Nillni</Author>
+    <Punchline>Captures Party Finder listings and reports them to pfexplorer for cross-client search.</Punchline>
+    <Description>Plugin to contribute on party finder for pfexplorer.com.</Description>
+    <PackageProjectUrl>https://pfexplorer.com</PackageProjectUrl>
+  </PropertyGroup>
+
+  <!-- Category icons for the alert match list — copied from website/icons/,
+       kept in sync manually since the two projects don't share a build. -->
+  <ItemGroup>
+    <None Include="icons\**\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

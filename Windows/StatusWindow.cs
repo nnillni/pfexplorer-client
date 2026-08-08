@@ -1,0 +1,594 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Windowing;
+using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+
+namespace PfExplorer.Windows;
+
+// "Options" window — opened via the cog button on MatchesWindow (the
+// primary results window) or Dalamud's own "Configure" entry. Two tabs:
+// "Party Finder" (the alert filters/notifications) and "Upload" (the
+// capture/contribute-to-the-server toggle). No results here — see
+// MatchListView/MatchesWindow for that.
+public class StatusWindow : Window, IDisposable
+{
+    // Every "real" job worth alerting on — base classes excluded, same
+    // grouping as the website's ROLE_JOB_SETS. BLU is deliberately not in
+    // here: it's locked out of virtually all normal duty content, so it
+    // gets its own row instead of sitting alongside Tank/Healer/DPS.
+    private static readonly (string Label, string[] Jobs)[] JobGroups =
+    {
+        ("Tank", new[] { "PLD", "WAR", "DRK", "GNB" }),
+        ("Healer", new[] { "WHM", "SCH", "AST", "SGE" }),
+        ("DPS", new[]
+        {
+            "MNK", "DRG", "NIN", "SAM", "RPR", "VPR", "BRD", "MCH", "DNC", "BLM", "SMN", "RDM", "PCT",
+        }),
+    };
+
+
+    private readonly Configuration _config;
+    private readonly ListingUploader _uploader;
+    private readonly AlertPoller _alertPoller;
+    private readonly PfBackgroundScraper _backgroundScraper;
+    private readonly MatchesWindow _matchesWindow;
+    private readonly MinimalMatchesWindow _minimalMatchesWindow;
+
+    private string _serverUrlBuffer;
+
+    // ImGui's tab bar remembers whichever tab was last active across
+    // frames on its own — set by Plugin's own per-frame Draw hook (which
+    // runs unconditionally every frame, unlike this window's own Draw,
+    // PreDraw etc., which only fire while IsOpen) whenever it detects
+    // IsOpen just flipped false->true, so Draw below can force-select
+    // "Party Finder" the moment this window opens instead of reopening
+    // onto whatever tab happened to be selected when it was last closed.
+    public bool ForceFirstTabOnNextDraw { get; set; }
+
+    public StatusWindow(
+        Configuration config, ListingUploader uploader, AlertPoller alertPoller, PfBackgroundScraper backgroundScraper,
+        MatchesWindow matchesWindow, MinimalMatchesWindow minimalMatchesWindow)
+        : base("PF Explorer Options##pfexplorer-status")
+    {
+        _config = config;
+        _uploader = uploader;
+        _alertPoller = alertPoller;
+        _backgroundScraper = backgroundScraper;
+        _matchesWindow = matchesWindow;
+        _minimalMatchesWindow = minimalMatchesWindow;
+        _serverUrlBuffer = config.ServerUrl;
+        IsOpen = false;
+
+        Size = new Vector2(420, 500);
+        SizeCondition = ImGuiCond.FirstUseEver;
+    }
+
+    // Glues this window to the right edge of whichever results window is
+    // currently open (MatchesWindow or MinimalMatchesWindow — only one ever
+    // is, see Plugin's SwitchToMinimal/SwitchToFull wiring), using its
+    // LastPosition/LastSize (the actual rendered rect, wherever it's been
+    // dragged to — not just wherever we last told it to go). Calls
+    // ImGui.SetNextWindowPos directly here rather than going through the
+    // Position/PositionCondition properties (which didn't visibly take
+    // effect — untested why, possibly some internal caching in the base
+    // Window class) so this window can't be dragged independently while a
+    // results window is open; it just follows along instead.
+    public override void PreDraw()
+    {
+        Vector2 anchorPosition, anchorSize;
+        if (_matchesWindow.IsOpen)
+        {
+            anchorPosition = _matchesWindow.LastPosition;
+            anchorSize = _matchesWindow.LastSize;
+        }
+        else if (_minimalMatchesWindow.IsOpen)
+        {
+            anchorPosition = _minimalMatchesWindow.LastPosition;
+            anchorSize = _minimalMatchesWindow.LastSize;
+        }
+        else
+        {
+            return;
+        }
+
+        var pos = anchorPosition + new Vector2(anchorSize.X, 0);
+        ImGui.SetNextWindowPos(pos, ImGuiCond.Always);
+    }
+
+    public override void Draw()
+    {
+        var partyFinderTabFlags = ForceFirstTabOnNextDraw ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        ForceFirstTabOnNextDraw = false;
+
+        if (!ImGui.BeginTabBar("##pfexplorer-tabs"))
+            return;
+
+        if (ImGui.BeginTabItem("Party Finder", partyFinderTabFlags))
+        {
+            DrawPartyFinderTab();
+            ImGui.EndTabItem();
+        }
+
+        if (ImGui.BeginTabItem("Upload"))
+        {
+            DrawUploadTab();
+            ImGui.EndTabItem();
+        }
+
+        if (ImGui.BeginTabItem("Debug"))
+        {
+            DrawDebugTab();
+            ImGui.EndTabItem();
+        }
+
+        ImGui.EndTabBar();
+    }
+
+    // Polls the server's search endpoint and lists/announces matches —
+    // independent of the Upload tab's capture/contribute toggle, since you
+    // might want alerts without contributing capture data, or vice versa.
+    private void DrawPartyFinderTab()
+    {
+        // Starting/stopping polling itself now lives on the play/stop
+        // button next to Refresh in MatchListView — these filters always
+        // show here regardless of whether it's currently running, so you
+        // can set everything up before pressing play.
+        DrawJobsHeader();
+        DrawItemLevelHeader();
+        DrawDataCentersHeader();
+
+        // Config field is still "exclude" internally (matches the server's
+        // own excludeXivpf query param — see AlertPoller.PollAsync), just
+        // inverted for display so the checkbox reads as an opt-in.
+        var addXivpf = !_config.AlertExcludeXivpf;
+        if (ImGui.Checkbox("Add xivpf.com results", ref addXivpf))
+        {
+            _config.AlertExcludeXivpf = !addXivpf;
+            _config.Save();
+            _alertPoller.ResetBaseline();
+            _alertPoller.RequestPoll();
+        }
+
+        DrawFreshnessDropdown();
+        DrawNotificationsHeader();
+
+        ImGui.Spacing();
+        var hideDescription = _config.AlertHideDescription;
+        if (ImGui.Checkbox("Hide descriptions in list", ref hideDescription))
+        {
+            _config.AlertHideDescription = hideDescription;
+            _config.Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        if (ImGui.Button("Reset to defaults"))
+            ResetToDefaults();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Clears jobs/item level/data centers/category/freshness filters and notification settings back to their defaults. Doesn't touch the Upload tab or whether polling is currently running.");
+    }
+
+    // Blank Configuration's own field defaults are the single source of
+    // truth here — copying from a fresh instance instead of hardcoding the
+    // values a second time keeps this from drifting out of sync with
+    // Configuration.cs.
+    private void ResetToDefaults()
+    {
+        var defaults = new Configuration();
+
+        _config.AlertJobs = defaults.AlertJobs;
+        _config.AlertIlvlMin = defaults.AlertIlvlMin;
+        _config.AlertIlvlMax = defaults.AlertIlvlMax;
+
+        // Same auto-detect as the first-run default (Plugin.
+        // TryInitializeDefaults) rather than leaving this on defaults.
+        // AlertDataCenters (empty/Any) — resetting should put you back
+        // where a fresh install would've left you, not blank.
+        var localDataCenter = MatchListView.GetLocalDataCenter();
+        _config.AlertDataCenters = localDataCenter != null
+            ? new List<string> { localDataCenter }
+            : defaults.AlertDataCenters;
+
+        _config.AlertExcludeXivpf = defaults.AlertExcludeXivpf;
+        _config.AlertCategory = defaults.AlertCategory;
+        _config.AlertFreshness = defaults.AlertFreshness;
+        _config.AlertNotifyOnNewMatch = defaults.AlertNotifyOnNewMatch;
+        _config.AlertNotifyOnPartyChange = defaults.AlertNotifyOnPartyChange;
+        _config.AlertNotifyOnRemoved = defaults.AlertNotifyOnRemoved;
+        _config.AlertNotifyChat = defaults.AlertNotifyChat;
+        _config.AlertNotifyToast = defaults.AlertNotifyToast;
+        _config.AlertNotifySound = defaults.AlertNotifySound;
+        _config.AlertHideDescription = defaults.AlertHideDescription;
+        _config.AlertBackgroundScraperEnabled = defaults.AlertBackgroundScraperEnabled;
+
+        _config.Save();
+        _alertPoller.ResetBaseline();
+        _alertPoller.RequestPoll();
+    }
+
+    private void DrawUploadTab()
+    {
+        var enabled = _config.Enabled;
+        if (ImGui.Checkbox("Capture & upload Party Finder listings", ref enabled))
+        {
+            _config.Enabled = enabled;
+            _config.Save();
+        }
+
+        // Passive-only for now (see PfExplorer's data-collection discussion —
+        // holding off on anything beyond organic ReceiveListing capture
+        // until that's settled) — checkbox left visible but unclickable
+        // rather than removed, so it's obvious this exists and is
+        // deliberately off, not missing. Force the config off too, not just
+        // the UI: someone who had this on from before it became passive-
+        // only shouldn't keep silently scanning just because the checkbox
+        // is no longer reachable.
+        var backgroundScraperEnabled = _config.AlertBackgroundScraperEnabled;
+        if (backgroundScraperEnabled)
+        {
+            _config.AlertBackgroundScraperEnabled = false;
+            _config.Save();
+            backgroundScraperEnabled = false;
+        }
+
+        ImGui.BeginDisabled();
+        ImGui.Checkbox("Scan Party Finder in the background", ref backgroundScraperEnabled);
+        ImGui.EndDisabled();
+        // Tooltip explaining the cadence/randomization removed along with
+        // this — nothing to explain while it can't be turned on. Original,
+        // for whenever this comes back:
+        // if (ImGui.IsItemHovered())
+        // {
+        //     ImGui.SetTooltip(
+        //         "Periodically checks every Party Finder category and uploads whatever it finds, "
+        //         + "roughly every 2 minutes — spread out randomly (not evenly, at least 2s apart) "
+        //         + "across that window, in a random order each time, and skips categories that "
+        //         + "were empty last time most (not all) of the time. Pauses automatically while "
+        //         + "you're in a duty, between zones, or otherwise unable to open Party Finder "
+        //         + "yourself anyway. Runs even if you never open the window yourself.");
+        // }
+        // ImGui.SameLine();
+        // // Unlike every other capture path here, this one calls the game's
+        // // own PF search function on a timer with no PF window ever open —
+        // // real traffic no normal play would generate. Same red used for
+        // // errors/zero-count warnings elsewhere in this window.
+        // ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
+        // ImGui.TextUnformatted("(use at your own risk)");
+        // ImGui.PopStyleColor();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        ImGui.TextUnformatted("Server URL");
+        ImGui.SetNextItemWidth(-1);
+        if (ImGui.InputText("##server-url", ref _serverUrlBuffer, 256))
+        {
+            _config.ServerUrl = _serverUrlBuffer;
+            _config.Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        ImGui.TextUnformatted($"Captured this session: {_uploader.TotalCaptured}");
+        ImGui.TextUnformatted($"Uploaded this session: {_uploader.TotalUploaded}");
+        ImGui.TextUnformatted(_uploader.LastUploadAt is { } last
+            ? $"Last upload: {last.ToLocalTime():HH:mm:ss}"
+            : "Last upload: never");
+        ImGui.TextUnformatted(_uploader.ContributorStats is { } stats
+            ? $"Contributors: {stats.Active} active (last 15min) / {stats.Total} total"
+            : "Contributors: —");
+
+        if (_uploader.LastError is { } error)
+        {
+            ImGui.Spacing();
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
+            ImGui.TextWrapped($"Last error: {error}");
+            ImGui.PopStyleColor();
+        }
+    }
+
+    // Answers "is RequestCategoryListings actually giving us everything, or
+    // just one page?" — reads the same native fields/nodes PfBackgroundScraper
+    // and PfListingOpener touch, straight off AgentLookingForGroup and the
+    // native LookingForGroup addon (if it happens to be open), so you can see
+    // what the last "All" request actually populated without guessing.
+    private unsafe void DrawDebugTab()
+    {
+        ImGui.TextWrapped("Diagnostic view of the native PF agent/addon state — used to check how many results a RequestCategoryListings(\"All\") call actually returns per page.");
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+        DrawScanLog();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        var agent = AgentLookingForGroup.Instance();
+        if (agent == null)
+        {
+            ImGui.TextDisabled("AgentLookingForGroup not available.");
+            return;
+        }
+
+        ImGui.TextUnformatted($"NumberOfListingsDisplayed: {agent->NumberOfListingsDisplayed}");
+        ImGui.TextUnformatted($"Listings.ListingIds count: {agent->Listings.ListingIds.Length}");
+        ImGui.TextUnformatted($"CategoryTab: {agent->CategoryTab}");
+        ImGui.TextUnformatted($"SearchAreaTab: {agent->SearchAreaTab}");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // Only populated while the native PF window itself is actually
+        // loaded — RequestCategoryListings updates the agent's data
+        // regardless, but these text nodes are addon UI state, not agent
+        // state, so they only reflect reality if the addon exists.
+        var addonPtr = Plugin.GameGui.GetAddonByName("LookingForGroup", 1).Address;
+        if (addonPtr == IntPtr.Zero)
+        {
+            ImGui.TextDisabled("LookingForGroup addon isn't loaded (open Party Finder in-game to see page/result text).");
+            return;
+        }
+
+        var addon = (AddonLookingForGroup*)addonPtr;
+        var resultsText = addon->ResultsCountTextNode != null ? addon->ResultsCountTextNode->NodeText.ToString() : "(none)";
+        var pageText = addon->CurrentPageTextNode != null ? addon->CurrentPageTextNode->NodeText.ToString() : "(none)";
+        ImGui.TextUnformatted($"ResultsCountTextNode: {resultsText}");
+        ImGui.TextUnformatted($"CurrentPageTextNode: {pageText}");
+    }
+
+    // One line per background scan (most recent first) — timestamp plus
+    // however many listing IDs Listings.ListingIds actually held ~1.5s
+    // after the request, sampled by PfBackgroundScraper itself. Answers
+    // "is that count ever capped at some fixed number regardless of how
+    // much is actually out there" without needing to eyeball the addon's
+    // text nodes scan-by-scan.
+    private void DrawScanLog()
+    {
+        ImGui.TextUnformatted("Background scan log");
+        ImGui.TextDisabled("  Command sent, how many ReceiveListing events actually fired ~1.5s afterward, and the first one's name");
+
+        if (_backgroundScraper.History.Count == 0)
+        {
+            ImGui.TextDisabled("  (no scans yet)");
+            return;
+        }
+
+        foreach (var scan in _backgroundScraper.History)
+        {
+            var firstNameText = string.IsNullOrEmpty(scan.FirstListingName) ? "(none)" : scan.FirstListingName;
+            ImGui.TextUnformatted($"  {scan.At.ToLocalTime():HH:mm:ss} — {scan.Command} — {scan.Count} listings — first: {firstNameText}");
+        }
+    }
+
+    // Collapsed by default — the header itself always shows a summary of
+    // what's currently selected, so you don't need to expand it just to
+    // remember what your own filter is set to.
+    private void DrawJobsHeader()
+    {
+        var summary = _config.AlertJobs.Count == 0 ? "Any" : string.Join(", ", _config.AlertJobs);
+        if (!ImGui.CollapsingHeader($"Jobs: {summary}###jobs-header"))
+            return;
+
+        foreach (var (label, jobs) in JobGroups)
+            DrawJobRow(label, jobs);
+
+        // BLU gets its own row rather than sitting in the DPS list — it's
+        // shut out of an "any job" open seat (see AlertPoller.Matches_),
+        // so checking it only matches a listing explicitly asking for BLU.
+        DrawJobRow("Limited", new[] { "BLU" });
+    }
+
+    private void DrawItemLevelHeader()
+    {
+        var summary = _config.AlertIlvlMin == 0 && _config.AlertIlvlMax == 0
+            ? "Any"
+            : $"{(_config.AlertIlvlMin == 0 ? "0" : _config.AlertIlvlMin.ToString())}–{(_config.AlertIlvlMax == 0 ? "∞" : _config.AlertIlvlMax.ToString())}";
+        if (!ImGui.CollapsingHeader($"Item level: {summary}###ilvl-header"))
+            return;
+
+        var ilvlMin = _config.AlertIlvlMin;
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("Min##ilvl-min", ref ilvlMin))
+        {
+            _config.AlertIlvlMin = Math.Max(0, ilvlMin);
+            _config.Save();
+            _alertPoller.ResetBaseline();
+            _alertPoller.RequestPoll();
+        }
+
+        ImGui.SameLine();
+        var ilvlMax = _config.AlertIlvlMax;
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("Max##ilvl-max", ref ilvlMax))
+        {
+            _config.AlertIlvlMax = Math.Max(0, ilvlMax);
+            _config.Save();
+            _alertPoller.ResetBaseline();
+            _alertPoller.RequestPoll();
+        }
+    }
+
+    private void DrawDataCentersHeader()
+    {
+        var summary = _config.AlertDataCenters.Count == 0 ? "Any" : string.Join(", ", _config.AlertDataCenters);
+        if (!ImGui.CollapsingHeader($"Data centers: {summary}###dc-header"))
+            return;
+
+        foreach (var (region, dataCenters) in DataCenterRegions.All)
+            DrawDataCenterRow(region, dataCenters);
+    }
+
+    // Same green/yellow/red buckets as the row tint (MatchFreshness.Rank) —
+    // lets you filter down to e.g. only green (freshest/most accurate)
+    // matches. Applies to notifications too (see AlertPoller.PollAsync), not
+    // just what's displayed.
+    private void DrawFreshnessDropdown()
+    {
+        ImGui.TextUnformatted("Freshness");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(200);
+
+        var currentLabel = _config.AlertFreshness < 0 ? "Any" : MatchFreshness.Labels[_config.AlertFreshness];
+
+        if (ImGui.BeginCombo("##freshness-filter", currentLabel))
+        {
+            var isAnySelected = _config.AlertFreshness < 0;
+            if (ImGui.Selectable("Any", isAnySelected))
+            {
+                _config.AlertFreshness = -1;
+                _config.Save();
+                _alertPoller.RequestPoll();
+            }
+
+            if (isAnySelected)
+                ImGui.SetItemDefaultFocus();
+
+            for (var rank = 0; rank < MatchFreshness.Labels.Length; rank++)
+            {
+                var isSelected = _config.AlertFreshness == rank;
+                ImGui.PushStyleColor(ImGuiCol.Text, MatchFreshness.Colors[rank]);
+                if (ImGui.Selectable(MatchFreshness.Labels[rank], isSelected))
+                {
+                    _config.AlertFreshness = rank;
+                    _config.Save();
+                    _alertPoller.RequestPoll();
+                }
+                ImGui.PopStyleColor();
+
+                if (isSelected)
+                    ImGui.SetItemDefaultFocus();
+            }
+
+            ImGui.EndCombo();
+        }
+    }
+
+    // Any combination of the three, independently — e.g. chat + sound but
+    // no toast is a perfectly reasonable setup. All off = silent (you'd
+    // just notice a new row in the list on your own).
+    private void DrawNotificationsHeader()
+    {
+        var triggers = new List<string>();
+        if (_config.AlertNotifyOnNewMatch) triggers.Add("New");
+        if (_config.AlertNotifyOnPartyChange) triggers.Add("Party change");
+        if (_config.AlertNotifyOnRemoved) triggers.Add("Removed");
+        var methods = new List<string>();
+        if (_config.AlertNotifyChat) methods.Add("Chat");
+        if (_config.AlertNotifyToast) methods.Add("Popup");
+        if (_config.AlertNotifySound) methods.Add("Sound");
+        var summary = triggers.Count == 0 || methods.Count == 0
+            ? "Off"
+            : $"{string.Join(" + ", triggers)} via {string.Join(" + ", methods)}";
+
+        if (!ImGui.CollapsingHeader($"Notify: {summary}###notify-header"))
+            return;
+
+        ImGui.TextUnformatted("Notify on");
+        var onNewMatch = _config.AlertNotifyOnNewMatch;
+        if (ImGui.Checkbox("New result found", ref onNewMatch))
+        {
+            _config.AlertNotifyOnNewMatch = onNewMatch;
+            _config.Save();
+        }
+
+        var onPartyChange = _config.AlertNotifyOnPartyChange;
+        if (ImGui.Checkbox("Party size changed", ref onPartyChange))
+        {
+            _config.AlertNotifyOnPartyChange = onPartyChange;
+            _config.Save();
+        }
+
+        var onRemoved = _config.AlertNotifyOnRemoved;
+        if (ImGui.Checkbox("Result no longer available", ref onRemoved))
+        {
+            _config.AlertNotifyOnRemoved = onRemoved;
+            _config.Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Deliver via");
+        var chat = _config.AlertNotifyChat;
+        if (ImGui.Checkbox("Echo in chat", ref chat))
+        {
+            _config.AlertNotifyChat = chat;
+            _config.Save();
+        }
+
+        var toast = _config.AlertNotifyToast;
+        if (ImGui.Checkbox("Popup on screen", ref toast))
+        {
+            _config.AlertNotifyToast = toast;
+            _config.Save();
+        }
+
+        var sound = _config.AlertNotifySound;
+        if (ImGui.Checkbox("Play a sound", ref sound))
+        {
+            _config.AlertNotifySound = sound;
+            _config.Save();
+        }
+    }
+
+    private void DrawJobRow(string label, string[] jobs)
+    {
+        ImGui.TextDisabled(label);
+        ImGui.SameLine(80);
+        for (var i = 0; i < jobs.Length; i++)
+        {
+            var job = jobs[i];
+            var isChecked = _config.AlertJobs.Contains(job);
+            if (ImGui.Checkbox(job, ref isChecked))
+            {
+                if (isChecked)
+                    _config.AlertJobs.Add(job);
+                else
+                    _config.AlertJobs.Remove(job);
+                _config.Save();
+                _alertPoller.ResetBaseline();
+                _alertPoller.RequestPoll();
+            }
+
+            if (i < jobs.Length - 1)
+                ImGui.SameLine();
+        }
+    }
+
+    private void DrawDataCenterRow(string region, string[] dataCenters)
+    {
+        ImGui.TextDisabled(region);
+        ImGui.SameLine(80);
+        for (var i = 0; i < dataCenters.Length; i++)
+        {
+            var dc = dataCenters[i];
+            var isChecked = _config.AlertDataCenters.Contains(dc);
+            if (ImGui.Checkbox(dc, ref isChecked))
+            {
+                if (isChecked)
+                    _config.AlertDataCenters.Add(dc);
+                else
+                    _config.AlertDataCenters.Remove(dc);
+                _config.Save();
+                _alertPoller.ResetBaseline();
+                _alertPoller.RequestPoll();
+            }
+
+            if (i < dataCenters.Length - 1)
+                ImGui.SameLine();
+        }
+    }
+
+    public void Dispose()
+    {
+    }
+}
