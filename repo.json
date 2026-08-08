@@ -3,7 +3,7 @@
     "Author": "Nahuel Nillni",
     "Name": "PF Explorer",
     "InternalName": "PfExplorer",
-    "AssemblyVersion": "0.1.1.0",
+    "AssemblyVersion": "0.1.2.0",
     "Description": "Plugin to contribute on party finder for pfexplorer.com.",
     "Punchline": "Captures Party Finder listings and reports them to pfexplorer for cross-client search.",
     "ApplicableVersion": "any",
@@ -14,6 +14,6 @@
     "DownloadLinkTesting": "https://github.com/nnillni/pfexplorer-client/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/nnillni/pfexplorer-client/releases/latest/download/latest.zip",
     "DownloadCount": 0,
-    "LastUpdate": "1786208770"
+    "LastUpdate": "1786209852"
   }
 ]
