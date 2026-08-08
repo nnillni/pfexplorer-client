@@ -1,7 +1,7 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <Version>0.1.1.0</Version>
+    <Version>0.1.2.0</Version>
     <Name>PF Explorer</Name>
     <Author>Nahuel Nillni</Author>
     <Punchline>Captures Party Finder listings and reports them to pfexplorer for cross-client search.</Punchline>
