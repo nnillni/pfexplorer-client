@@ -381,6 +381,31 @@ public sealed class PfBackgroundScraper
             _ = _uploader.ExpireAsync(removedListingIds);
     }
 
+    // Inverse of ExpectedRawCategories, built once and cached — maps a
+    // listing's raw PfListingSearchResult.Category (e.g. "Dungeons",
+    // "FieldOperations") back to the byte RequestCategoryListings expects.
+    // Used by PfListingOpener to prefetch real listing data for a specific
+    // category before jumping to a listing in it — the same request this
+    // class fires for its own background walk, just triggered on demand
+    // instead of on a schedule.
+    private static readonly Lazy<Dictionary<string, byte>> RawCategoryToRequestByte = new(() =>
+    {
+        var map = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (categoryValue, label) in Categories)
+        {
+            if (categoryValue is not { } value)
+                continue;
+            if (!ExpectedRawCategories.TryGetValue(label, out var rawCategories))
+                continue;
+            foreach (var raw in rawCategories)
+                map[raw] = value;
+        }
+        return map;
+    });
+
+    public static byte? CategoryByteFor(string rawCategory) =>
+        RawCategoryToRequestByte.Value.TryGetValue(rawCategory, out var value) ? value : null;
+
     private void RecordScan(DateTime at, string command, int count, string? firstListingName)
     {
         _history.Insert(0, new ScanResult(at, command, count, firstListingName));

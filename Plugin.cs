@@ -107,6 +107,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw += _backgroundScraper.Tick;
         PluginInterface.UiBuilder.Draw += TrackStatusWindowTransitions;
+        PluginInterface.UiBuilder.Draw += PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi += _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi += ToggleActiveMatchesWindow;
 
@@ -121,6 +122,20 @@ public sealed class Plugin : IDalamudPlugin
         // request actually return something") and its stale-match pruning,
         // neither of which are the upload path.
         _backgroundScraper.NotifyListingReceived(dto);
+
+        // Also unconditional, and not just for PfBackgroundScraper's own
+        // scan cycle: PfBackgroundScraper explicitly skips scanning while
+        // you have the native PF window open yourself (it would yank the
+        // category/page out from under you), so browsing manually was the
+        // one case where the alert pipeline had zero local ground truth —
+        // a listing you were staring at could still get announced "gone"
+        // by AlertPoller.PollAsync's server-diff alone. Feeding every
+        // listing the game shows you (any source, not just the scraper's)
+        // into RefreshFromScan freshens its CapturedAt/slots and clears
+        // local removal suppression exactly like a background scan does.
+        var localDataCenter = MatchListView.GetLocalDataCenter();
+        if (localDataCenter != null)
+            _alertPoller.RefreshFromScan(new[] { dto }, localDataCenter);
 
         if (!_config.Enabled)
             return;
@@ -230,6 +245,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw -= _backgroundScraper.Tick;
         PluginInterface.UiBuilder.Draw -= TrackStatusWindowTransitions;
+        PluginInterface.UiBuilder.Draw -= PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi -= _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleActiveMatchesWindow;
         PartyFinderGui.ReceiveListing -= OnReceiveListing;

@@ -5,9 +5,11 @@ using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Plugin.Services;
 using PfExplorer.Models;
 
@@ -93,6 +95,22 @@ public sealed class AlertPoller : IDisposable
     // set to at any given moment.
     private Dictionary<int, int>? _previousSlotsFilled;
 
+    // Consecutive polls a previously-matching listing has been absent from
+    // the server's response — PollAsync's own "gone" path (low-confidence:
+    // the server just stopped returning it, not ground truth the way
+    // PruneMissing's scan-confirmed removal is) requires this to cross
+    // MissingPollThreshold, and the listing's own freshness to have aged
+    // into red, before announcing. Absorbs the case where a listing drops
+    // out for exactly one poll right as it crosses the server's own
+    // LISTING_FRESHNESS_MINUTES cutoff (which lines up almost exactly with
+    // MatchFreshness's red threshold) but is still real — RefreshFromScan
+    // (fed by both PfBackgroundScraper and manual PF browsing, see
+    // Plugin.OnReceiveListing) resets an id's streak back to 0 the moment
+    // anything actually re-observes it, same self-healing idea as
+    // _locallyRemovedListingIds above.
+    private readonly Dictionary<int, int> _missingPollStreak = new();
+    private const int MissingPollThreshold = 2;
+
     // Guards against the manual refresh button and the timer firing a poll
     // at the same time and racing each other.
     private volatile bool _isPolling;
@@ -114,6 +132,20 @@ public sealed class AlertPoller : IDisposable
     public DateTime? NextPollAt => LastPollAt?.AddMilliseconds(PollIntervalMs);
     public string? LastError { get; private set; }
 
+    // A fixed-size rotating pool of Dalamud chat link handlers, each backing
+    // one clickable announcement — Dalamud's AddChatLinkHandler needs a
+    // stable commandId registered up front, so this pre-registers a fixed
+    // set rather than one per message (which would leak a handler per
+    // notification for the rest of the session). Round-robins through the
+    // pool (see NextLinkPayload) — old lines beyond the pool size fall back
+    // to whatever listing that slot was last reused for if clicked, which
+    // in practice only matters for scrollback older than ~ClickableLinkPoolSize
+    // clickable announcements back, an acceptable tradeoff for not leaking.
+    private const int ClickableLinkPoolSize = 32;
+    private readonly DalamudLinkPayload[] _linkPayloads = new DalamudLinkPayload[ClickableLinkPoolSize];
+    private readonly PfListingSearchResult?[] _linkTargets = new PfListingSearchResult?[ClickableLinkPoolSize];
+    private int _nextLinkSlot;
+
     public AlertPoller(Configuration config, IPluginLog log, IChatGui chatGui, IToastGui toastGui)
     {
         _config = config;
@@ -128,6 +160,27 @@ public sealed class AlertPoller : IDisposable
         // itself no-ops if AlertEnabled is still off, so this is harmless
         // either way).
         _timer = new Timer(_ => OnTimerTick(), null, 0, Timeout.Infinite);
+
+        for (var i = 0; i < ClickableLinkPoolSize; i++)
+        {
+            var slot = i;
+            _linkPayloads[i] = _chatGui.AddChatLinkHandler((uint)slot, (_, _) =>
+            {
+                if (_linkTargets[slot] is { } target)
+                    PfListingOpener.Open(target);
+            });
+        }
+    }
+
+    // Claims the next slot in the rotating pool for `listing` and returns
+    // its payload — call once per clickable announcement, right before
+    // building the message that embeds it.
+    private DalamudLinkPayload ClaimLinkPayload(PfListingSearchResult listing)
+    {
+        var slot = _nextLinkSlot;
+        _nextLinkSlot = (_nextLinkSlot + 1) % ClickableLinkPoolSize;
+        _linkTargets[slot] = listing;
+        return _linkPayloads[slot];
     }
 
     private void OnTimerTick()
@@ -151,6 +204,7 @@ public sealed class AlertPoller : IDisposable
         _previousMatchingIds = null;
         _previousSlotsFilled = null;
         _announcedMatchIds.Clear();
+        _missingPollStreak.Clear();
     }
 
     // Fire-and-forget: called from the window's manual refresh button so a
@@ -273,6 +327,41 @@ public sealed class AlertPoller : IDisposable
                 listing.Tags = previous.Tags;
             }
 
+            // Server-diff absence is low-confidence (see _missingPollStreak's
+            // doc comment) — a previously-matching listing this poll's
+            // response doesn't include gets kept around (using its last
+            // known data), and never counted as actually gone, until BOTH:
+            //   - it's been missing for MissingPollThreshold consecutive
+            //     polls (absorbs a single transient/timing-edge absence),
+            //     and
+            //   - its own freshness has aged into red (worse than yellow) —
+            //     a listing still green/yellow was reconfirmed too recently
+            //     to plausibly be gone already; a real removal will have had
+            //     time to age into red by the time the streak alone would've
+            //     confirmed it anyway.
+            // Both conditions live in this one retention decision (not a
+            // separate later gate on the announcement) so the result row and
+            // the "gone" announcement always agree — the row never quietly
+            // disappears from Matches while only the chat line is held back.
+            // Streak resets to 0 the instant the server response includes it
+            // again; freshness resets any time RefreshFromScan re-observes
+            // it (background scan or you browsing PF yourself).
+            var respondedListingIds = listings.Select(l => l.ListingId).ToHashSet();
+            foreach (var previous in Matches)
+            {
+                if (respondedListingIds.Contains(previous.ListingId))
+                {
+                    _missingPollStreak.Remove(previous.Id);
+                    continue;
+                }
+
+                var streak = _missingPollStreak.GetValueOrDefault(previous.Id) + 1;
+                _missingPollStreak[previous.Id] = streak;
+                var isStale = streak >= MissingPollThreshold && MatchFreshness.Rank(previous.CapturedAt) >= 2;
+                if (!isStale)
+                    listings.Add(previous);
+            }
+
             var matching = listings.Where(Matches_).ToList();
             var matchingIds = matching.Select(l => l.Id).ToHashSet();
 
@@ -284,13 +373,6 @@ public sealed class AlertPoller : IDisposable
             _previousSlotsFilled = matching.ToDictionary(l => l.Id, l => l.SlotsFilled);
             LastPollAt = DateTime.UtcNow;
             LastError = null;
-
-            // Seeded every poll (not just for ones that get announced) so a
-            // listing that's currently hidden by the category/freshness
-            // display filter doesn't later "become new" the moment it starts
-            // passing that filter — see _announcedMatchIds's doc comment.
-            foreach (var id in matchingIds)
-                _announcedMatchIds.Add(id);
 
             if (previousIds != null)
             {
@@ -338,14 +420,20 @@ public sealed class AlertPoller : IDisposable
 
                 if (_config.AlertNotifyOnRemoved)
                 {
-                    // Ids that were matching last poll and aren't anymore —
-                    // covers a listing aging out of the server's own active
-                    // window (freshness/expires_at) or getting expired via
-                    // the verified-deletion consensus, for DCs the local
-                    // scan can't directly confirm. A scan-confirmed removal
-                    // (PruneMissing) announces separately and immediately;
-                    // by the time this runs, PruneMissing has already
-                    // scrubbed that id out of previousIds too, so there's no
+                    // Ids that were matching last poll and still aren't,
+                    // after the retention loop above already gave them
+                    // MissingPollThreshold polls' grace and required red
+                    // freshness — so anything that lands here has been both
+                    // absent a while and not reconfirmed by anyone,
+                    // including this client's own local view. Covers a
+                    // listing aging out of the server's own active window or
+                    // getting expired via the verified-deletion consensus,
+                    // for DCs the local scan can't directly confirm. A
+                    // scan-confirmed removal (PruneMissing) announces
+                    // separately and immediately — ground truth from the
+                    // game itself doesn't need to wait on any of this; by
+                    // the time this runs, PruneMissing has already scrubbed
+                    // that id out of previousIds too, so there's no
                     // double-announce between the two paths.
                     var removed = new List<PfListingSearchResult>();
                     foreach (var id in previousIds)
@@ -366,6 +454,18 @@ public sealed class AlertPoller : IDisposable
                         AnnounceRemoved(listing);
                 }
             }
+
+            // Seeded every poll (not just for ones that get announced) so a
+            // listing that's currently hidden by the category/freshness
+            // display filter doesn't later "become new" the moment it starts
+            // passing that filter — see _announcedMatchIds's doc comment.
+            // Has to run after the new-match check above, not before: it
+            // used to run first, which meant _announcedMatchIds already
+            // contained every currently-matching id by the time that check
+            // ran, so "not already announced" was never true for anything —
+            // no "new" notification ever fired, for any listing, ever.
+            foreach (var id in matchingIds)
+                _announcedMatchIds.Add(id);
         }
         catch (Exception ex)
         {
@@ -433,6 +533,10 @@ public sealed class AlertPoller : IDisposable
             match.OpenSlotJobs = fresh.OpenSlotJobs;
             match.Tags = fresh.Tags;
             match.CapturedAt = fresh.CapturedAt;
+            // Actually re-observed, from any source (background scan or you
+            // browsing PF yourself) — not just "the server still lists it".
+            // See _missingPollStreak's doc comment.
+            _missingPollStreak.Remove(match.Id);
             updated++;
         }
 
@@ -470,6 +574,8 @@ public sealed class AlertPoller : IDisposable
                 _previousSlotsFilled.Remove(id);
         if (NewMatchIds.Count > 0)
             NewMatchIds = NewMatchIds.Where(id => !staleSet.Contains(id)).ToHashSet();
+        foreach (var id in staleSet)
+            _missingPollStreak.Remove(id);
 
         // Also block this exact listing from being resurrected by the next
         // poll (see _locallyRemovedListingIds's doc comment) — the game
@@ -524,58 +630,69 @@ public sealed class AlertPoller : IDisposable
                 : accepted.Any(_config.AlertJobs.Contains));
     }
 
-    // UIColor sheet row IDs — vivid/saturated (rgb per xivapi's decoded
-    // UIColor.UIForeground): 45 = (0,204,34) green, 37 = (0,153,255) blue.
-    // Red is NOT the original 17 — checked, and 17 has no value in the
-    // sheet at all (same problem 518 had during the muted detour), so it
-    // was never actually rendering red this whole time regardless of what
-    // it was set to. 19 = (68,11,0) is the only row with a fully-saturated
-    // (sat 1.0) genuine red — darker in absolute terms since that's just
-    // what the sheet has, but it's real saturated red, not a broken lookup.
-    private const ushort NewMatchColor = 45; // green
-    private const ushort PartyChangeColor = 37; // blue
-    private const ushort RemovedColor = 19; // red
+    // UIColor row 1 — a genuine 0xFFFFFFFF pure white (verified the same way
+    // as AlertRemovedColor's 518: read the actual sheet rather than
+    // guessing), used to make the duty name and slot count stand out from
+    // the rest of the message regardless of whatever ambient color a
+    // player's chat channel/theme normally renders default text in.
+    private const ushort WhiteColor = 1;
+
+    // Exposed for StatusWindow's Debug tab "test" button — same call path a
+    // real match/change/removal fires, just with synthetic data, so what
+    // you see there is exactly what a real notification would look like.
+    // All three in one call (rather than separate buttons) since there's
+    // nothing to configure differently between them — just fire and look.
+    public void TestAllAnnouncements()
+    {
+        AnnounceNewMatch(SampleListing());
+        AnnouncePartyChange(SampleListing(), previousSlotsFilled: 4);
+        AnnounceRemoved(SampleListing());
+    }
+
+    // Uses your actual current data center (falling back to a fixed one if
+    // it can't be resolved, e.g. not logged in) rather than a hardcoded
+    // value — a hardcoded DC here would make the test announcements
+    // silently non-clickable for anyone not standing on that exact one,
+    // since SendNotification only attaches a link for same-DC listings.
+    private static PfListingSearchResult SampleListing() => new()
+    {
+        Id = -1,
+        ListingId = "0",
+        Name = "Test Recruiter",
+        World = "Excalibur",
+        DataCenter = Windows.MatchListView.GetLocalDataCenter() ?? "Primal",
+        DutyName = "Zoraal Ja (Extreme)",
+        Category = "Trials",
+        SlotsFilled = 5,
+        SlotsAvailable = 8,
+        CapturedAt = DateTime.UtcNow.ToString("o"),
+    };
 
     private void AnnounceNewMatch(PfListingSearchResult listing) =>
-        SendNotification(MatchCategorizer.BuildNewMatchAnnouncement(listing), MatchCategorizer.NewMatchTag, NewMatchColor);
+        SendNotification(MatchCategorizer.BuildNewMatchAnnouncement(listing), MatchCategorizer.NewMatchTag, _config.AlertNewMatchColor, listing);
 
     private void AnnouncePartyChange(PfListingSearchResult listing, int previousSlotsFilled) =>
-        SendNotification(MatchCategorizer.BuildPartyChangeAnnouncement(listing, previousSlotsFilled), MatchCategorizer.PartyChangeTag, PartyChangeColor);
+        SendNotification(MatchCategorizer.BuildPartyChangeAnnouncement(listing, previousSlotsFilled), MatchCategorizer.PartyChangeTag, _config.AlertPartyChangeColor, listing);
 
     private void AnnounceRemoved(PfListingSearchResult listing) =>
-        SendNotification(MatchCategorizer.BuildRemovedAnnouncement(listing), MatchCategorizer.RemovedTag, RemovedColor);
+        SendNotification(MatchCategorizer.BuildRemovedAnnouncement(listing), MatchCategorizer.RemovedTag, _config.AlertRemovedColor, listing);
 
     // Any combination of chat/toast/sound, independently — delivery method
     // is separate from which events trigger a notification in the first
     // place (AlertNotifyOnNewMatch/AlertNotifyOnPartyChange, checked by the
     // callers above before this is even reached).
-    private void SendNotification(string message, string tag, ushort colorKey)
+    private void SendNotification(string message, string tag, ushort colorKey, PfListingSearchResult listing)
     {
         if (!_config.AlertNotifyChat && !_config.AlertNotifyToast && !_config.AlertNotifySound)
             return;
 
         if (_config.AlertNotifyChat)
         {
-            // Only the "(new)"/"(changed)"/"(gone)" tag itself is colored —
-            // coloring the whole line made every announcement read as one
-            // solid color block instead of the tag standing out against
-            // normal chat text.
-            var tagIndex = message.IndexOf(tag, StringComparison.Ordinal);
-            var builder = new SeStringBuilder();
-            if (tagIndex < 0)
-            {
-                builder.AddText(message);
-            }
-            else
-            {
-                builder.AddText(message[..tagIndex])
-                    .AddUiForeground(colorKey)
-                    .AddText(tag)
-                    .AddUiForegroundOff()
-                    .AddText(message[(tagIndex + tag.Length)..]);
-            }
-
-            _chatGui.Print(builder.Build());
+            // Always clickable now — PfListingOpener itself handles a
+            // different-DC listing (prompts travel if the region allows it,
+            // shows an error toast if not), so there's no case left where
+            // clicking would silently do nothing.
+            _chatGui.Print(BuildColoredMessage(message, tag, colorKey, ClaimLinkPayload(listing)));
         }
 
         if (_config.AlertNotifyToast)
@@ -605,9 +722,97 @@ public sealed class AlertPoller : IDisposable
         }
     }
 
+    // Builds the actual colored chat payload — three independently-colored
+    // spans layered onto MatchCategorizer's plain message string:
+    //   - "<Duty Tab> (tag)" in colorKey (ties the category to the event
+    //     type at a glance, not just the tag floating alone mid-line).
+    //   - the quoted duty name in WhiteColor.
+    //   - the trailing slot-count group ("(5/8)" or "(5/8 -> 6/8)") in
+    //     WhiteColor, when the message has one — BuildRemovedAnnouncement's
+    //     messages don't, since a gone listing has no current party size.
+    // Everything else stays plain (default chat color). When `link` is
+    // non-null, the whole line is additionally wrapped in it — clicking
+    // anywhere on the message calls that payload's handler (see
+    // ClaimLinkPayload), same as a native chat link.
+    private static SeString BuildColoredMessage(string message, string tag, ushort colorKey, DalamudLinkPayload? link)
+    {
+        var tagIndex = message.IndexOf(tag, StringComparison.Ordinal);
+        if (tagIndex < 0)
+        {
+            var plainBuilder = new SeStringBuilder();
+            if (link != null) plainBuilder.Add(link);
+            plainBuilder.AddText(message);
+            if (link != null) plainBuilder.Add(RawPayload.LinkTerminator);
+            return plainBuilder.Build();
+        }
+
+        var tagEnd = tagIndex + tag.Length;
+
+        // The duty name is always the first "..."-quoted span. The slot
+        // count, when present, is always the message's own final
+        // parenthesized group — DutyName can itself contain parens (e.g.
+        // "Zoraal Ja (Extreme)"), but those sit inside the quotes, earlier
+        // in the string, so "last '(' in the whole message" still lands on
+        // the count group whenever one exists rather than on those.
+        var quoteStart = message.IndexOf('"', tagEnd);
+        var quoteEnd = quoteStart >= 0 ? message.IndexOf('"', quoteStart + 1) : -1;
+        var dutyNameEnd = quoteEnd >= 0 ? quoteEnd + 1 : -1;
+
+        // Checked against the actual shape ("5/8" or "5/8 -> 6/8"), not just
+        // "some trailing (...)" — a removed-listing message has no count
+        // group at all, and without this its trailing "(World)" (the last
+        // parenthetical in that message) would get mistaken for one and
+        // colored white along with it.
+        var countStart = message.LastIndexOf('(');
+        var hasCount = countStart >= 0 && countStart > dutyNameEnd && message.EndsWith(")", StringComparison.Ordinal)
+            && Regex.IsMatch(message[(countStart + 1)..^1], @"^\d+/\d+( -> \d+/\d+)?$");
+
+        var builder = new SeStringBuilder();
+        if (link != null)
+            builder.Add(link);
+
+        var cursor = 0;
+
+        void AppendPlain(int end)
+        {
+            if (end > cursor)
+                builder.AddText(message[cursor..end]);
+        }
+
+        // From the very start of the line, not just from tagIndex — colors
+        // "<Duty Tab> (gone)" together (e.g. "High End Duty (gone)"), same
+        // as before this method's white-span support was added.
+        builder.AddUiForeground(colorKey).AddText(message[cursor..tagEnd]).AddUiForegroundOff();
+        cursor = tagEnd;
+
+        if (dutyNameEnd > cursor)
+        {
+            AppendPlain(quoteStart);
+            builder.AddUiForeground(WhiteColor).AddText(message[quoteStart..dutyNameEnd]).AddUiForegroundOff();
+            cursor = dutyNameEnd;
+        }
+
+        if (hasCount)
+        {
+            AppendPlain(countStart);
+            builder.AddUiForeground(WhiteColor).AddText(message[countStart..]).AddUiForegroundOff();
+            cursor = message.Length;
+        }
+
+        AppendPlain(message.Length);
+        if (link != null)
+            builder.Add(RawPayload.LinkTerminator);
+        return builder.Build();
+    }
+
     public void Dispose()
     {
         _timer.Dispose();
         _http.Dispose();
+        // Removes every commandId this instance registered in the pool
+        // above — RemoveChatLinkHandler() with no id removes all of this
+        // plugin's handlers at once, so a reload doesn't leave the old
+        // instance's handlers (closing over its now-disposed state) live.
+        _chatGui.RemoveChatLinkHandler();
     }
 }

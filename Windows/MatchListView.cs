@@ -364,7 +364,7 @@ public class MatchListView : IDisposable
 
             ImGui.SetTooltip("Click to view in-game");
             if (ImGui.IsItemClicked())
-                PfListingOpener.Open(listing.ListingId);
+                PfListingOpener.Open(listing);
         }
 
         ImGui.TableNextRow();
@@ -456,12 +456,11 @@ public class MatchListView : IDisposable
                     tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion}), and only Oceania allows cross-region travel";
                 ImGui.SetTooltip(tooltip);
             }
-            // "/li" is whatever your own travel macro/plugin expects a data
-            // center name after — adjust the command string here if yours
-            // differs. Dalamud forwards unrecognized commands straight to
-            // the game's own chat input, same as typing it yourself.
+            // Same confirmation popup PfListingOpener.Open uses for a
+            // clicked result in a different DC — one travel flow, not two
+            // that behave differently depending which button you clicked.
             if (clicked && canTravel)
-                Plugin.CommandManager.ProcessCommand($"/li {listing.DataCenter}");
+                PfListingOpener.RequestTravel(listing.DataCenter, listing.World);
         }
     }
 
@@ -755,7 +754,7 @@ public class MatchListView : IDisposable
 
             ImGui.SetTooltip("Click to view in-game");
             if (ImGui.IsItemClicked())
-                PfListingOpener.Open(listing.ListingId);
+                PfListingOpener.Open(listing);
         }
 
         // Same green/yellow/red freshness tint as the normal table rows

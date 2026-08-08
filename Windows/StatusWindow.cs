@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Interface.Windowing;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -204,6 +205,9 @@ public class StatusWindow : Window, IDisposable
         _config.AlertNotifyChat = defaults.AlertNotifyChat;
         _config.AlertNotifyToast = defaults.AlertNotifyToast;
         _config.AlertNotifySound = defaults.AlertNotifySound;
+        _config.AlertNewMatchColor = defaults.AlertNewMatchColor;
+        _config.AlertPartyChangeColor = defaults.AlertPartyChangeColor;
+        _config.AlertRemovedColor = defaults.AlertRemovedColor;
         _config.AlertHideDescription = defaults.AlertHideDescription;
         _config.AlertBackgroundScraperEnabled = defaults.AlertBackgroundScraperEnabled;
 
@@ -307,6 +311,19 @@ public class StatusWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
+        DrawColorSwatchButton();
+
+        // Fires all three Announce* -> SendNotification -> BuildColoredMessage
+        // paths a real match/change/removal does, just with synthetic
+        // listing data — so the colors (and the white duty-name/slot-count
+        // spans) shown in chat are exactly what a real notification
+        // renders, without waiting for one to happen.
+        if (ImGui.Button("Test all 3 announcement types"))
+            _alertPoller.TestAllAnnouncements();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
         DrawScanLog();
 
         ImGui.Spacing();
@@ -345,6 +362,119 @@ public class StatusWindow : Window, IDisposable
         var pageText = addon->CurrentPageTextNode != null ? addon->CurrentPageTextNode->NodeText.ToString() : "(none)";
         ImGui.TextUnformatted($"ResultsCountTextNode: {resultsText}");
         ImGui.TextUnformatted($"CurrentPageTextNode: {pageText}");
+    }
+
+    // Prints one chat line per UIColor sheet row, each colored via that
+    // row's own ID (Dalamud.Game.Text.SeStringHandling.SeStringBuilder.
+    // AddUiForeground(ushort) — the same call AlertPoller.SendNotification
+    // uses for the "(new)"/"(gone)" tags) — the row ID is the only thing
+    // callers actually pass, the client resolves the real color from it at
+    // render time, so this is the only reliable way to see what a given
+    // row looks like in real chat rendering rather than guessing from a
+    // decoded RGB value that might not match (see AlertPoller's own
+    // RemovedColor history — 19 vs 518 looked fine on paper too until
+    // someone actually looked at it in game).
+    private void DrawColorSwatchButton()
+    {
+        if (ImGui.Button("Print all UIColor rows to chat"))
+            PrintColorSwatches();
+        ImGui.SameLine();
+        ImGui.TextDisabled("(spams chat — one line per row, look for the row ID next to the color you want)");
+    }
+
+    private void PrintColorSwatches()
+    {
+        foreach (var (id, _) in GetUiColorSwatches())
+        {
+            var builder = new SeStringBuilder()
+                .AddUiForeground((ushort)id)
+                .AddText($"Row {id}: The quick brown fox")
+                .AddUiForegroundOff();
+            Plugin.ChatGui.Print(builder.Build());
+        }
+    }
+
+    // Built once and cached for the process lifetime — the sheet doesn't
+    // change at runtime, and this backs a combo box that gets rebuilt every
+    // frame it's open. Color is decoded from the "Dark" column specifically:
+    // UIColor has separate columns per UI color theme (Dark/Light/Classic/
+    // Clear variants) added alongside the newer theme options, and AddUiForeground
+    // resolves whichever one the player's own client theme is set to at
+    // render time — Dark is FFXIV's default, so it's the closest single
+    // preview to what most people (including whoever's picking a color
+    // here) will actually see in their own chat log.
+    private static List<(uint Id, Vector4 Color)>? _uiColorSwatches;
+
+    private static List<(uint Id, Vector4 Color)> GetUiColorSwatches()
+    {
+        if (_uiColorSwatches != null)
+            return _uiColorSwatches;
+
+        var list = new List<(uint, Vector4)>();
+        var sheet = Plugin.DataManager.GetExcelSheet<Lumina.Excel.Sheets.UIColor>();
+        if (sheet != null)
+        {
+            foreach (var row in sheet)
+            {
+                if (row.RowId == 0 || row.RowId > ushort.MaxValue)
+                    continue;
+
+                var rgba = row.Dark;
+                var r = ((rgba >> 24) & 0xFF) / 255f;
+                var g = ((rgba >> 16) & 0xFF) / 255f;
+                var b = ((rgba >> 8) & 0xFF) / 255f;
+                list.Add((row.RowId, new Vector4(r, g, b, 1f)));
+            }
+        }
+
+        _uiColorSwatches = list;
+        return list;
+    }
+
+    // Falls back to white if the configured row id isn't in the sheet for
+    // some reason (shouldn't happen — pickers only ever write ids that came
+    // from this same list — but a missing color shouldn't crash a Draw call).
+    private static Vector4 GetSwatchColor(ushort id)
+    {
+        foreach (var (rowId, color) in GetUiColorSwatches())
+        {
+            if (rowId == id)
+                return color;
+        }
+        return Vector4.One;
+    }
+
+    // A combo box where every option is rendered as its own actual color
+    // (a swatch button next to the row ID), not just a numbered list — the
+    // whole point being you can see what you're picking instead of guessing
+    // from a row number, same as the Debug tab's "print all to chat" button
+    // but without spamming chat every time you open a dropdown.
+    private void DrawColorPicker(string id, Func<ushort> get, Action<ushort> set)
+    {
+        var current = get();
+        var currentColor = GetSwatchColor(current);
+
+        ImGui.PushID(id);
+        ImGui.ColorButton("##current", currentColor, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(20, 20));
+        ImGui.SameLine();
+
+        if (ImGui.BeginCombo("Color", $"Row {current}"))
+        {
+            foreach (var (rowId, color) in GetUiColorSwatches())
+            {
+                ImGui.PushID((int)rowId);
+                ImGui.ColorButton("##swatch", color, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(16, 16));
+                ImGui.SameLine();
+                if (ImGui.Selectable($"Row {rowId}", rowId == current))
+                {
+                    set((ushort)rowId);
+                    _config.Save();
+                }
+                ImGui.PopID();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.PopID();
     }
 
     // One line per background scan (most recent first) — timestamp plus
@@ -441,7 +571,22 @@ public class StatusWindow : Window, IDisposable
 
         var currentLabel = _config.AlertFreshness < 0 ? "Any" : MatchFreshness.Labels[_config.AlertFreshness];
 
-        if (ImGui.BeginCombo("##freshness-filter", currentLabel))
+        // The dropdown's own selectable rows were already colored per-status
+        // below — this colors the closed combo's preview (the currently
+        // selected value shown before you even open it) the same way, so
+        // e.g. "Green" shows green whether the dropdown is open or closed,
+        // not just while picking. "Any" has no single status to match, so
+        // it stays the default text color.
+        var previewColorPushed = _config.AlertFreshness >= 0;
+        if (previewColorPushed)
+            ImGui.PushStyleColor(ImGuiCol.Text, MatchFreshness.Colors[_config.AlertFreshness]);
+
+        var comboOpen = ImGui.BeginCombo("##freshness-filter", currentLabel);
+
+        if (previewColorPushed)
+            ImGui.PopStyleColor();
+
+        if (comboOpen)
         {
             var isAnySelected = _config.AlertFreshness < 0;
             if (ImGui.Selectable("Any", isAnySelected))
@@ -495,26 +640,44 @@ public class StatusWindow : Window, IDisposable
             return;
 
         ImGui.TextUnformatted("Notify on");
+
+        // Each checkbox's own label is tinted with that event's configured
+        // chat color (same lookup DrawColorPicker's preview swatch uses) —
+        // so e.g. "New result found" actually reads green when that's what
+        // AlertNewMatchColor is set to, matching what you'll actually see
+        // in chat, not just a swatch floating unrelated next to plain text.
+        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertNewMatchColor));
         var onNewMatch = _config.AlertNotifyOnNewMatch;
         if (ImGui.Checkbox("New result found", ref onNewMatch))
         {
             _config.AlertNotifyOnNewMatch = onNewMatch;
             _config.Save();
         }
+        ImGui.PopStyleColor();
+        ImGui.SameLine();
+        DrawColorPicker("##color-new", () => _config.AlertNewMatchColor, v => _config.AlertNewMatchColor = v);
 
+        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertPartyChangeColor));
         var onPartyChange = _config.AlertNotifyOnPartyChange;
         if (ImGui.Checkbox("Party size changed", ref onPartyChange))
         {
             _config.AlertNotifyOnPartyChange = onPartyChange;
             _config.Save();
         }
+        ImGui.PopStyleColor();
+        ImGui.SameLine();
+        DrawColorPicker("##color-changed", () => _config.AlertPartyChangeColor, v => _config.AlertPartyChangeColor = v);
 
+        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertRemovedColor));
         var onRemoved = _config.AlertNotifyOnRemoved;
         if (ImGui.Checkbox("Result no longer available", ref onRemoved))
         {
             _config.AlertNotifyOnRemoved = onRemoved;
             _config.Save();
         }
+        ImGui.PopStyleColor();
+        ImGui.SameLine();
+        DrawColorPicker("##color-removed", () => _config.AlertRemovedColor, v => _config.AlertRemovedColor = v);
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Deliver via");

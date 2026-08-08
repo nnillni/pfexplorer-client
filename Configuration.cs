@@ -61,7 +61,9 @@ public class Configuration : IPluginConfiguration
     // Which events actually trigger a notification — independent of each
     // other (and of the delivery methods below): a listing you're already
     // watching filling up (5/8 -> 6/8) is a different signal than a brand
-    // new one appearing, and either can be turned off on its own.
+    // new one appearing, and either can be turned off on its own. Removed
+    // defaults off — new/changed are the actionable ones, gone is mostly
+    // noise once new/changed are already the primary signal.
     public bool AlertNotifyOnNewMatch { get; set; } = true;
     public bool AlertNotifyOnPartyChange { get; set; } = true;
 
@@ -69,14 +71,26 @@ public class Configuration : IPluginConfiguration
     // covers the duty ending/filling/being closed, or just aging out of
     // the server's active window, without trying to tell those cases
     // apart (see AlertPoller.AnnounceRemoved).
-    public bool AlertNotifyOnRemoved { get; set; } = true;
+    public bool AlertNotifyOnRemoved { get; set; } = false;
+
+    // UIColor sheet row IDs used to color each announcement's "<Duty Tab>
+    // (tag)" prefix in the chat echo (see AlertPoller.SendNotification) —
+    // only matters when AlertNotifyChat is on, but kept independent of it
+    // so turning chat off and back on doesn't lose your picks. Defaults
+    // picked via StatusWindow's Debug tab color-swatch dump: 45 = green,
+    // 502, 518 = vivid red (not 19 — dark red, see AlertPoller's own
+    // history of that constant).
+    public ushort AlertNewMatchColor { get; set; } = 45;
+    public ushort AlertPartyChangeColor { get; set; } = 502;
+    public ushort AlertRemovedColor { get; set; } = 518;
 
     // How to announce: any combination, or none (silent — you'd just
     // notice it in the list/popout on its own). Message format:
     // '<Duty Tab> (new): "Duty Title" by Author (World) (5/8)' for a new
     // match, '...(changed): ... (5/8 -> 6/8)' for a party-size change.
-    public bool AlertNotifyChat { get; set; } = false;
-    public bool AlertNotifyToast { get; set; } = true;
+    // Chat echo only by default — toast/sound off.
+    public bool AlertNotifyChat { get; set; } = true;
+    public bool AlertNotifyToast { get; set; } = false;
     public bool AlertNotifySound { get; set; } = false;
 
     // Hides each listing's description text in the match list/popout —
