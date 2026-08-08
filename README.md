@@ -22,6 +22,10 @@ A Dalamud plugin that captures Party Finder listings as you browse them in-game 
 
 Per listing: the listing/recruiter's public Party Finder info (duty, world, job slots, description, etc. — the same data the game shows to any player who opens PF) and a locally-generated random contributor ID used only to count distinct installs. No account credentials, character name beyond what PF already shows, or fixed hardware/account identifiers are collected.
 
+## AI usage
+
+Developed with substantial AI assistance (Claude Code) under human direction and review — see [AI-DECLARATION.md](AI-DECLARATION.md) for the detailed breakdown.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
