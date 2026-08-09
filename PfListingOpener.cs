@@ -6,20 +6,26 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using PfExplorer.Models;
 using PfExplorer.Windows;
 
 namespace PfExplorer;
 
-// Opens a specific PF listing in-game when a result is clicked. Doing this
-// right takes more than just AgentLookingForGroup.OpenListing(id): that call
-// only shows something if the local client already has that listing's raw
-// data cached, which is only true for listings your own client has actually
-// requested — most results here came from someone else's plugin/xivpf, so
-// without a fresh RequestCategoryListings first, OpenListing would silently
-// show nothing. Firing that request also happens to feed our own capture/
-// upload pipeline, so a click here doubles as "go look at this" and "go
-// capture this category" at the same time.
+// Opens a specific PF listing in-game when a result is clicked — one click,
+// one native call, never more (see Open's own doc comment for the exact
+// priority order). AgentLookingForGroup.OpenListing(id) alone only shows
+// something if the local client already has that listing's raw data cached,
+// which is only true for listings your own client has actually requested —
+// most results here came from someone else's plugin/xivpf, so a single
+// click often can't reach a join popup in one step. Rather than chaining
+// Show + RequestCategoryListings + OpenListing together behind one click
+// (crosses from "UI convenience" into automating what should be several
+// separate manual actions), each click does exactly the next thing that's
+// missing, in priority order — repeated/idle clicks naturally walk the rest
+// of the way there, and past that point get spent sweeping other
+// categories' listings into the capture/upload pipeline instead of doing
+// nothing.
 public static class PfListingOpener
 {
     // Party Finder itself is unreachable while logged out, inside a duty
@@ -77,6 +83,11 @@ public static class PfListingOpener
     private static (string DataCenter, string World)? _pendingTravel;
     private static bool _travelPopupNeedsOpen;
     private const string TravelPopupId = "Travel?##pf-travel-confirm";
+
+    // For Open's tab-rotation fallback (see its own doc comment) — not
+    // seeded/deterministic on purpose, this only ever needs to pick
+    // "some other tab," never to be reproducible.
+    private static readonly Random TabRandom = new();
 
     // Shared by Open (below, for a same-region-different-DC listing) and
     // MatchListView's dedicated Travel button — one confirmation flow
@@ -142,41 +153,89 @@ public static class PfListingOpener
         if (agent == null)
             return;
 
-        // Only Show() if it isn't already open — avoids disturbing an
-        // active browse. Calling Show() again on an already-open window
-        // isn't needed for anything below, so skip it rather than risk
-        // resetting scroll/layout state for no reason.
-        if (Plugin.GameGui.GetAddonByName("LookingForGroup", 1).Address == IntPtr.Zero)
+        // One click, one native call — checked fresh every click, in this
+        // priority order:
+        //   1. PF window not open yet? Open it. agent->Show() confirmed
+        //      live to close the detail popup instead of opening the list
+        //      window when called while the popup's already up (some
+        //      native toggle-like behavior in AgentLookingForGroup's own
+        //      Show(), not anything in our code) — ordering the window
+        //      before the popup means Show() only ever runs while the
+        //      popup definitely isn't open yet, so there's nothing for it
+        //      to close.
+        //   2. Window's open, but the join popup either isn't up yet or is
+        //      showing a *different* listing than the one just clicked?
+        //      Open this one. IsAddonVisible alone can't tell those two
+        //      cases apart (it only knows some detail popup is up, not
+        //      whose) — _lastOpenedListingId is what catches "you clicked
+        //      someone else's listing" so that doesn't get mistaken for
+        //      "already got what you asked for" and fall through to the
+        //      tab-rotation step below instead of actually opening it.
+        //   3. Both open AND it's already this exact listing showing?
+        //      Nothing left worth doing for THIS listing — rather than a
+        //      no-op click, sweep to a random other tab instead. Not
+        //      user-facing usefulness; purely opportunistic, so repeated/
+        //      idle clicking still ends up feeding more categories'
+        //      listings into the capture/upload pipeline instead of doing
+        //      nothing.
+        // IsVisible (AtkUnitBase, inherited by every addon struct), not
+        // just GetAddonByName returning non-null — that only means an
+        // addon is loaded in memory, not that it's actually on screen.
+        var lfgOpen = IsAddonVisible("LookingForGroup");
+        var detailOpen = IsAddonVisible("LookingForGroupDetail");
+        var isSameListing = listing.ListingId == _lastOpenedListingId;
+        _lastOpenedListingId = listing.ListingId;
+
+        if (!lfgOpen)
+        {
             agent->Show();
+            return;
+        }
 
-        // Always fires, open-or-not: this is what actually switches to the
-        // right tab (a different category from whatever was showing) or
-        // refreshes it (already on that tab) — RequestCategoryListings
-        // re-requests either way, there's no separate "just switch" vs
-        // "just refresh" case to distinguish here.
-        //
-        // Prefers the display bucket over the raw category — MatchCategorizer
-        // reclassifies specific fights (e.g. "The Unmaking (Extreme)") from
-        // their raw "Trials"/"Raids" category into "HighEndDuty", which IS a
-        // real PF tab; using the raw category here would silently open the
-        // wrong tab for those. Falls back to the raw category when the
-        // bucket isn't a real tab at all (e.g. "BlueMage", which is a
-        // display-only grouping over ordinary Dungeons/Trials/Raids content,
-        // not its own PF category).
-        var category = CategoryByteFor(MatchCategorizer.CategoryBucket(listing)) ?? CategoryByteFor(listing.Category);
-        if (category is { } value)
-            agent->RequestCategoryListings(value);
+        if (!detailOpen || !isSameListing)
+        {
+            if (ulong.TryParse(listing.ListingId, out var listingId))
+                agent->OpenListing(listingId);
+            return;
+        }
 
-        if (ulong.TryParse(listing.ListingId, out var listingId))
-            agent->OpenListing(listingId);
+        // RequestCategoryListings alone refreshes the underlying list data
+        // but doesn't reliably move the addon's own visible tab highlight —
+        // pinning CategoryTab afterward is what actually makes the tab
+        // selection itself visibly change instead of just the results.
+        var tab = RandomOtherTab(agent->CategoryTab);
+        agent->RequestCategoryListings(tab);
+        agent->CategoryTab = tab;
+    }
 
-        // OpenListing appears to set CategoryTab from the listing's own data
-        // once it resolves, which can clobber what RequestCategoryListings
-        // just set — pinning it here, last, is what actually keeps the
-        // visible tab matching the category we requested regardless of
-        // whatever order those two do their own internal bookkeeping in.
-        if (category is { } tab)
-            agent->CategoryTab = tab;
+    // Tracks which listing the join popup (if any) actually belongs to —
+    // see Open's own doc comment on why IsAddonVisible alone can't
+    // distinguish "showing this listing" from "showing whatever was last
+    // opened."
+    private static string? _lastOpenedListingId;
+
+    // GetAddonByName only tells you an addon is loaded, not that it's
+    // actually being drawn — an addon can sit loaded-but-hidden (see Open's
+    // own comment on why this matters). IsVisible (AtkUnitBase, inherited
+    // by every addon struct) is the real check.
+    private static unsafe bool IsAddonVisible(string name)
+    {
+        var addonPtr = Plugin.GameGui.GetAddonByName(name, 1).Address;
+        return addonPtr != IntPtr.Zero && ((AtkUnitBase*)addonPtr)->IsVisible;
+    }
+
+    // Picks a real PF tab (1-16, see RawCategoryToRequestByte) other than
+    // `current` — excluding it guarantees Open's tab-rotation fallback
+    // (above) actually moves somewhere new on every one of these clicks
+    // instead of occasionally re-picking the tab already showing by chance.
+    private static byte RandomOtherTab(byte current)
+    {
+        byte next;
+        do
+        {
+            next = (byte)TabRandom.Next(1, 17);
+        } while (next == current);
+        return next;
     }
 
     // Unlike LookingForGroup, there's no dedicated AgentLookingForGroup-style

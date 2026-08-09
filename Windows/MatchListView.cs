@@ -382,6 +382,13 @@ public class MatchListView : IDisposable
         var isNew = _alertPoller.NewMatchIds.Contains(listing.ListingId);
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
+        // No point offering to travel to the DC you're already standing
+        // in. Declared up front (rather than down by the dedicated Travel
+        // column, where this lived before) so HandleColumnClick's tooltip
+        // below can also reflect it.
+        var needsTravel = _localDataCenter == null
+            || !string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
+
         // Each column's content is wrapped in Begin/EndGroup so the whole
         // column — every line plus the gaps between them, not just the
         // exact pixels of a specific icon/text widget — acts as a single
@@ -397,7 +404,11 @@ public class MatchListView : IDisposable
             if (!ImGui.IsItemHovered())
                 return;
 
-            ImGui.SetTooltip("Click to view in-game");
+            // A different-DC listing takes exactly one click to reach the
+            // travel prompt (PfListingOpener.Open's own DC check runs
+            // before the multi-click join flow below), not two — matching
+            // that here instead of always showing "Click twice to view".
+            ImGui.SetTooltip(needsTravel ? "Click to travel" : "Click twice to view");
             if (ImGui.IsItemClicked())
                 PfListingOpener.Open(listing);
         }
@@ -455,10 +466,7 @@ public class MatchListView : IDisposable
         HandleColumnClick();
 
         ImGui.TableNextColumn();
-        // No point offering to travel to the DC you're already standing in.
-        var alreadyThere = _localDataCenter != null
-            && string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
-        if (!alreadyThere)
+        if (needsTravel)
         {
             // The World Visit System only allows cross-DC travel within
             // your own region (NA/EU/JP) — except Oceania, which is exempt
@@ -839,9 +847,9 @@ public class MatchListView : IDisposable
         {
             string tooltip;
             if (!needsTravel)
-                tooltip = "Click to view in-game";
+                tooltip = "Click twice to view";
             else if (canTravel)
-                tooltip = $"Click to travel to {listing.DataCenter} to view in-game";
+                tooltip = "Click to travel";
             else if (!PfListingOpener.IsInOpenWorld)
                 tooltip = "Can't travel right now — only available out in the open world";
             else
