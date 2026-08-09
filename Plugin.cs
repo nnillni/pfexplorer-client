@@ -107,7 +107,6 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw += _scanTracker.Tick;
         PluginInterface.UiBuilder.Draw += TrackStatusWindowTransitions;
-        PluginInterface.UiBuilder.Draw += PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi += _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi += ToggleActiveMatchesWindow;
 
@@ -243,7 +242,6 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw -= _scanTracker.Tick;
         PluginInterface.UiBuilder.Draw -= TrackStatusWindowTransitions;
-        PluginInterface.UiBuilder.Draw -= PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi -= _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleActiveMatchesWindow;
         PartyFinderGui.ReceiveListing -= OnReceiveListing;

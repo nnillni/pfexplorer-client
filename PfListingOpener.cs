@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
-using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -31,9 +28,9 @@ public static class PfListingOpener
     // Party Finder itself is unreachable while logged out, inside a duty
     // instance, or between zones/cutscenes — RequestCategoryListings still
     // "succeeds" in those states, it just never yields ReceiveListing
-    // calls. Shared by Open/RequestTravel (below) and MatchListView's own
-    // travel-button gating — one definition of "actually in the open world
-    // right now" instead of two that could silently drift apart.
+    // calls. Shared by Open (below) and MatchListView's own travel-icon
+    // gating — one definition of "actually in the open world right now"
+    // instead of two that could silently drift apart.
     public static bool IsInOpenWorld =>
         Plugin.ClientState.IsLoggedIn
         && !Plugin.Condition[ConditionFlag.BoundByDuty]
@@ -74,46 +71,15 @@ public static class PfListingOpener
     public static byte? CategoryByteFor(string rawCategory) =>
         RawCategoryToRequestByte.TryGetValue(rawCategory, out var value) ? value : null;
 
-    // "/li" turned out to be bound to a travel plugin that executes a world
-    // visit immediately, with no confirmation of its own —
-    // not something to fire straight from a click, since it's a much bigger
-    // deal than opening a window. DrawTravelConfirmation (wired into
-    // Plugin's Draw hook) renders an actual Yes/No popup instead; this just
-    // records what it's asking about and that the popup needs to open.
-    private static (string DataCenter, string World)? _pendingTravel;
-    private static bool _travelPopupNeedsOpen;
-    private const string TravelPopupId = "Travel?##pf-travel-confirm";
-
     // For Open's tab-rotation fallback (see its own doc comment) — not
     // seeded/deterministic on purpose, this only ever needs to pick
     // "some other tab," never to be reproducible.
     private static readonly Random TabRandom = new();
 
-    // Shared by Open (below, for a same-region-different-DC listing) and
-    // MatchListView's dedicated Travel button — one confirmation flow
-    // instead of two, so both surfaces behave the same way instead of one
-    // asking and the other still firing instantly.
-    public static void RequestTravel(string dataCenter, string world)
-    {
-        // The World Visit System (and whatever "/li" is bound to) isn't
-        // usable mid-duty/zoning/cutscene any more than the PF window
-        // itself is — see IsInOpenWorld above. Checked here too, not just
-        // in Open below, since MatchListView's Travel button calls this
-        // directly without going through Open.
-        if (!IsInOpenWorld)
-        {
-            Plugin.ToastGui.ShowError("Can't travel right now — only available out in the open world.");
-            return;
-        }
-
-        _pendingTravel = (dataCenter, world);
-        _travelPopupNeedsOpen = true;
-    }
-
     public static unsafe void Open(PfListingSearchResult listing)
     {
-        // Same reasoning as RequestTravel above — opening the native PF
-        // window isn't meaningful mid-duty/zoning/cutscene either.
+        // Opening the native PF window isn't meaningful mid-duty/zoning/
+        // cutscene either — see IsInOpenWorld's own doc comment.
         if (!IsInOpenWorld)
         {
             Plugin.ToastGui.ShowError("Can't open Party Finder right now — only available out in the open world.");
@@ -129,22 +95,22 @@ public static class PfListingOpener
         var localDataCenter = MatchListView.GetLocalDataCenter();
         if (localDataCenter != null && !string.Equals(localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase))
         {
-            // Same region-gate as MatchListView's dedicated Travel button —
-            // the World Visit System only allows cross-DC travel within your
-            // own region (NA/EU/JP), except Oceania, which is exempt from
-            // that restriction in both directions.
+            // No more one-click auto-travel — it let a click silently fire a
+            // real world visit through whatever "/li"-bound plugin you had
+            // installed, with no confirmation of its own beyond the popup
+            // this used to show. Same region-gate as MatchListView's travel
+            // icon uses for its tooltip — the World Visit System only allows
+            // cross-DC travel within your own region (NA/EU/JP), except
+            // Oceania, which is exempt from that restriction in both
+            // directions — just to pick which toast to show, since neither
+            // case does anything but tell you why you can't see this party.
             var localRegion = DataCenterRegions.RegionOf(localDataCenter);
             var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
             var canTravel = targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion);
 
-            if (canTravel)
-            {
-                RequestTravel(listing.DataCenter, listing.World);
-            }
-            else
-            {
-                Plugin.ToastGui.ShowError($"Can't travel to {listing.DataCenter} to see this party — different region, and only Oceania allows cross-region travel.");
-            }
+            Plugin.ToastGui.ShowError(canTravel
+                ? $"Needs to travel to {listing.DataCenter} to see this party — travel there yourself first."
+                : $"Cannot travel to {listing.DataCenter} to see this party — different region, and only Oceania allows cross-region travel.");
 
             return;
         }
@@ -253,72 +219,5 @@ public static class PfListingOpener
         var agent = Framework.Instance()->GetUIModule()->GetAgentModule()->GetAgentByInternalId(AgentId.AozNotebook);
         if (agent != null)
             agent->Show();
-    }
-
-    // Wired into Plugin's Draw hook, runs every frame regardless of
-    // _pendingTravel's state — ImGui.OpenPopup has to be called from inside
-    // an active frame, which a chat link's click callback isn't guaranteed
-    // to be, so this is the one place that's actually safe to call it from
-    // (once, on the frame right after Open sets a pending request).
-    public static void DrawTravelConfirmation()
-    {
-        if (_travelPopupNeedsOpen)
-        {
-            // Captured here rather than at the actual click (RequestTravel/
-            // Open) — this runs on the very next Draw after that click, in
-            // the same frame in the row-click case, so the mouse hasn't
-            // meaningfully moved, and this is guaranteed to run inside an
-            // active ImGui frame (see this method's own doc comment) where
-            // a chat link's click callback isn't. Offset right/down a
-            // little so the popup doesn't open directly under the cursor.
-            var clickPos = ImGui.GetMousePos();
-            ImGui.SetNextWindowPos(new Vector2(
-                clickPos.X + 12 * ImGuiHelpers.GlobalScale,
-                clickPos.Y + 8 * ImGuiHelpers.GlobalScale));
-            ImGui.OpenPopup(TravelPopupId);
-            _travelPopupNeedsOpen = false;
-        }
-
-        if (_pendingTravel is not { } pending)
-            return;
-
-        // A regular (non-modal) popup, not BeginPopupModal — a modal centers
-        // itself and dims the whole screen behind it regardless of
-        // SetNextWindowPos, which read as "fullscreen" for something this
-        // small; a plain popup stays where it's placed, has no dimming, and
-        // closes on its own if you click elsewhere instead of needing an
-        // explicit Cancel.
-        if (ImGui.BeginPopup(TravelPopupId, ImGuiWindowFlags.AlwaysAutoResize))
-        {
-            ImGui.TextUnformatted($"Travel to {pending.World} ({pending.DataCenter}) to see this party?");
-            ImGui.Spacing();
-
-            if (ImGui.Button("Travel"))
-            {
-                // ProcessCommand only dispatches to plugin-registered
-                // commands (see OpenBlueMageSpellbook's comment above) and
-                // returns false silently if nothing owns "/li" — unlike
-                // actually typing it in the chat box, nothing shows up on
-                // screen in that case. Surface that ourselves so "no travel
-                // plugin installed" looks like an error instead of a dead
-                // click.
-                if (!Plugin.CommandManager.ProcessCommand($"/li {pending.DataCenter}"))
-                {
-                    Plugin.ChatGui.PrintError("/li command not found.");
-                }
-
-                _pendingTravel = null;
-                ImGui.CloseCurrentPopup();
-            }
-
-            ImGui.SameLine();
-            if (ImGui.Button("Cancel"))
-            {
-                _pendingTravel = null;
-                ImGui.CloseCurrentPopup();
-            }
-
-            ImGui.EndPopup();
-        }
     }
 }

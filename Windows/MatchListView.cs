@@ -95,6 +95,24 @@ public class MatchListView : IDisposable
         _ => FreshnessRedBg,
     };
 
+    // How dim a row needing travel should read — a bigger drop when travel
+    // isn't even possible right now than when it's just one manual step
+    // away, so "can't reach this at all" reads as more disabled than "can
+    // reach it, just not with one click anymore".
+    private static float RowAlphaMultiplier(bool needsTravel, bool canTravel) =>
+        !needsTravel ? 1f : (canTravel ? 0.85f : 0.55f);
+
+    // ImGuiStyleVar.Alpha only modulates ImGui's own widget rendering
+    // (Text, Button, Image, ...) — it does NOT apply to ImGui.TableSetBgColor
+    // or anything drawn straight to a DrawList (ImGui.GetWindowDrawList()),
+    // both of which bake their own alpha into the packed color instead.
+    // FreshnessBg's tint is drawn through exactly those two paths (table row
+    // background here, a manually-drawn rect in minimal mode), so a row
+    // that's supposed to look dimmed for needing travel would keep its full-
+    // strength freshness tint unless that alpha is folded into the color
+    // itself before it goes to GetColorU32 — this is that fold.
+    private static Vector4 WithAlpha(Vector4 color, float multiplier) => color with { W = color.W * multiplier };
+
     // Same wording as the website's formatLastUpdated (app.js) — shown in
     // place of the data center (dropped in favor of this; the travel
     // button already makes the DC obvious) in the row's world/recruiter
@@ -383,11 +401,23 @@ public class MatchListView : IDisposable
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
         // No point offering to travel to the DC you're already standing
-        // in. Declared up front (rather than down by the dedicated Travel
+        // in. Declared up front (rather than down by the travel icon
         // column, where this lived before) so HandleColumnClick's tooltip
         // below can also reflect it.
         var needsTravel = _localDataCenter == null
             || !string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
+
+        // The World Visit System only allows cross-DC travel within your
+        // own region (NA/EU/JP) — except Oceania, which is exempt from
+        // that restriction in both directions, so it's always reachable
+        // regardless of where you're currently standing. Only meaningful
+        // (and only computed) when needsTravel — otherwise there's nothing
+        // to explain.
+        var canTravel = needsTravel
+            && (DataCenterRegions.RegionOf(listing.DataCenter) == "OCE"
+                || (DataCenterRegions.RegionOf(_localDataCenter) is { } localRegion
+                    && localRegion == DataCenterRegions.RegionOf(listing.DataCenter)))
+            && PfListingOpener.IsInOpenWorld;
 
         // Each column's content is wrapped in Begin/EndGroup so the whole
         // column — every line plus the gaps between them, not just the
@@ -404,17 +434,30 @@ public class MatchListView : IDisposable
             if (!ImGui.IsItemHovered())
                 return;
 
-            // A different-DC listing takes exactly one click to reach the
-            // travel prompt (PfListingOpener.Open's own DC check runs
-            // before the multi-click join flow below), not two — matching
-            // that here instead of always showing "Click twice to view".
-            ImGui.SetTooltip(needsTravel ? "Click to travel" : "Click twice to view");
+            // No more one-click travel (see PfListingOpener.Open) — the
+            // tooltip is purely informational now, same two messages the
+            // travel icon column shows below.
+            ImGui.SetTooltip(needsTravel
+                ? (canTravel ? $"Needs to travel to {listing.DataCenter}" : $"Cannot travel to {listing.DataCenter}")
+                : "Click twice to view");
             if (ImGui.IsItemClicked())
                 PfListingOpener.Open(listing);
         }
 
+        // A listing you can't reach without traveling first reads as
+        // "disabled" for the rest of the row — dimmer still when travel
+        // isn't even possible right now (see RowAlphaMultiplier). Not a
+        // full BeginDisabled dim, which would also kill the tooltip/click
+        // handling above that this row still needs.
+        var rowAlphaMultiplier = RowAlphaMultiplier(needsTravel, canTravel);
+
         ImGui.TableNextRow();
-        ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt))));
+        // WithAlpha, not the ImGuiStyleVar.Alpha pushed below — table row
+        // backgrounds don't respect that style var (see WithAlpha's own
+        // doc comment).
+        ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(WithAlpha(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt)), rowAlphaMultiplier)));
+
+        using var rowAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, rowAlphaMultiplier);
 
         ImGui.TableNextColumn();
         using (ImRaii.Group())
@@ -466,49 +509,21 @@ public class MatchListView : IDisposable
         HandleColumnClick();
 
         ImGui.TableNextColumn();
-        if (needsTravel)
+        using (ImRaii.Group())
         {
-            // The World Visit System only allows cross-DC travel within
-            // your own region (NA/EU/JP) — except Oceania, which is exempt
-            // from that restriction in both directions, so it's always
-            // reachable regardless of where you're currently standing.
-            var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
-            var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
-            var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
-                && PfListingOpener.IsInOpenWorld;
-
-            // Icon-only instead of a "Travel" text label — the column was
-            // mostly empty space around that one word; the tooltip covers
-            // what it does without needing to spell it out.
-            bool clicked;
-            using (ImRaii.Disabled(!canTravel))
-            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
-                clicked = ImGui.SmallButton($"{FontAwesomeIcon.PlaneDeparture.ToIconString()}##travel-{listing.Id}");
-            // BeginDisabled makes IsItemHovered() return false by default —
-            // AllowWhenDisabled is needed to still get the tooltip telling
-            // you *why* it's disabled, which is the whole point here.
-            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            if (needsTravel)
             {
-                string tooltip;
-                if (canTravel)
-                    tooltip = $"Travel to {listing.DataCenter}";
-                else if (!PfListingOpener.IsInOpenWorld)
-                    tooltip = "Can't travel right now — only available out in the open world";
-                else if (targetRegion == null)
-                    // A data center we don't recognize at all (not in
-                    // DataCenterRegions.All) — no region to explain, so
-                    // don't guess at one.
-                    tooltip = "Cannot travel here";
-                else
-                    tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion}), and only Oceania allows cross-region travel";
-                ImGui.SetTooltip(tooltip);
+                // Plain icon, not a button — same "you'll need to travel
+                // for this one" flag the minimal view uses, not a second
+                // click target that could fire travel on its own (see
+                // PfListingOpener.Open's own doc comment on why one-click
+                // travel was removed).
+                using (ImRaii.PushColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f)))
+                using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                    ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
             }
-            // Same confirmation popup PfListingOpener.Open uses for a
-            // clicked result in a different DC — one travel flow, not two
-            // that behave differently depending which button you clicked.
-            if (clicked && canTravel)
-                PfListingOpener.RequestTravel(listing.DataCenter, listing.World);
         }
+        HandleColumnClick();
     }
 
     // "30s", "5m", "1h20m" — same compact style as the website's freshness
@@ -810,29 +825,14 @@ public class MatchListView : IDisposable
     {
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
-        // Same green/yellow/red freshness tint as the normal table rows
-        // (FreshnessBg) — painted manually since minimal mode isn't a table
-        // here (no TableSetBgColor to lean on), sized to cover the 22px
-        // icon plus a little breathing room.
-        var rowHeight = Math.Max(22f * ImGuiHelpers.GlobalScale, ImGui.GetTextLineHeight()) + 4f * ImGuiHelpers.GlobalScale;
-        var rowStart = ImGui.GetCursorScreenPos();
-        var rowWidth = ImGui.GetContentRegionAvail().X;
-        var rowEnd = new Vector2(rowStart.X + rowWidth, rowStart.Y + rowHeight);
-        ImGui.GetWindowDrawList().AddRectFilled(rowStart, rowEnd, ImGui.GetColorU32(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt))));
-
-        // A real full-row hit target, not per-widget — this row (unlike the
-        // full table's) is a single fixed-height line, so its bounds are
-        // known upfront: draw an invisible Selectable spanning the whole
-        // row, then reset the cursor back to rowStart so the actual icon/
-        // text content draws on top of it in the same space. Nothing drawn
-        // afterward (Image/Text) is itself interactive, so there's no
-        // overlap conflict to resolve.
         // Same "do I need to travel, and can I" logic as the full table's
-        // dedicated Travel button/column — used below for an icon rather
-        // than a separate clickable button, since the whole row already
-        // triggers PfListingOpener.Open (which itself prompts/errors on
-        // travel as needed — see PfListingOpener.Open) regardless of where
-        // on the row you click.
+        // travel icon column — used below for an icon rather than a
+        // separate clickable button, since the whole row already triggers
+        // PfListingOpener.Open (which itself toasts an error for a
+        // different-DC listing now instead of prompting to travel — see
+        // PfListingOpener.Open's own doc comment) regardless of where on
+        // the row you click. Computed up front so the freshness tint below
+        // can also be dimmed by it.
         var alreadyThere = _localDataCenter != null
             && string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
         var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
@@ -840,21 +840,32 @@ public class MatchListView : IDisposable
         var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
             && PfListingOpener.IsInOpenWorld;
         var needsTravel = !alreadyThere;
+        var rowAlphaMultiplier = RowAlphaMultiplier(needsTravel, canTravel);
+
+        // Same green/yellow/red freshness tint as the normal table rows
+        // (FreshnessBg) — painted manually since minimal mode isn't a table
+        // here (no TableSetBgColor to lean on), sized to cover the 22px
+        // icon plus a little breathing room. WithAlpha, not the
+        // ImGuiStyleVar.Alpha pushed below — a manually drawn rect doesn't
+        // respect that style var (see WithAlpha's own doc comment).
+        var rowHeight = Math.Max(22f * ImGuiHelpers.GlobalScale, ImGui.GetTextLineHeight()) + 4f * ImGuiHelpers.GlobalScale;
+        var rowStart = ImGui.GetCursorScreenPos();
+        var rowWidth = ImGui.GetContentRegionAvail().X;
+        var rowEnd = new Vector2(rowStart.X + rowWidth, rowStart.Y + rowHeight);
+        ImGui.GetWindowDrawList().AddRectFilled(rowStart, rowEnd, ImGui.GetColorU32(WithAlpha(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt)), rowAlphaMultiplier)));
+
+        // A listing you can't reach without traveling first reads as
+        // "disabled" over the row's own content, matching the full table's
+        // rows (see RowAlphaMultiplier).
+        using var rowAlpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, rowAlphaMultiplier);
 
         ImGui.SetCursorScreenPos(rowStart);
         var rowClicked = ImGui.Selectable($"##row-{listing.Id}", false, ImGuiSelectableFlags.None, new Vector2(rowWidth, rowHeight));
         if (ImGui.IsItemHovered())
         {
-            string tooltip;
-            if (!needsTravel)
-                tooltip = "Click twice to view";
-            else if (canTravel)
-                tooltip = "Click to travel";
-            else if (!PfListingOpener.IsInOpenWorld)
-                tooltip = "Can't travel right now — only available out in the open world";
-            else
-                tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion ?? "unknown"}), and only Oceania allows cross-region travel";
-            ImGui.SetTooltip(tooltip);
+            ImGui.SetTooltip(needsTravel
+                ? (canTravel ? $"Needs to travel to {listing.DataCenter}" : $"Cannot travel to {listing.DataCenter}")
+                : "Click twice to view");
         }
         ImGui.SetCursorScreenPos(rowStart);
 
@@ -879,8 +890,8 @@ public class MatchListView : IDisposable
             // Right-aligned, plain icon (not a button) — a visual "you'll
             // need to travel for this one" flag, not a second click target;
             // the row itself already handles the click. Dimmed when travel
-            // isn't even possible, same distinction the full table's
-            // disabled Travel button makes.
+            // isn't even possible, same distinction the full table's travel
+            // icon column makes.
             ImGui.SameLine(rowWidth - 18 * ImGuiHelpers.GlobalScale);
             using (ImRaii.PushColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f)))
             using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))

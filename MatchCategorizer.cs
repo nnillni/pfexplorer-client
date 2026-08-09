@@ -119,6 +119,24 @@ public static class MatchCategorizer
         return rawCategory == "BlueMage" ? "Other" : rawCategory;
     }
 
+    // Same as CategoryBucket, minus the Blue Mage reclassification — the
+    // tab a listing genuinely lives under in-game, since the game has no
+    // dedicated Blue Mage PF tab: a BLU-flagged dungeon/trial/raid/HET
+    // listing still only ever shows (and closes) under its own native
+    // Dungeons/Trials/Raids/HighEndDuty tab, same as any other listing in
+    // that category. PruneMissing (AlertPoller) matches on this instead of
+    // CategoryBucket for exactly that reason — CategoryBucket collapses
+    // every BLU-eligible category into one "BlueMage" value, which would
+    // make a scan of any single real tab ambiguous about which BLU
+    // listings it actually just proved gone.
+    public static string NativeBucket(PfListingSearchResult listing)
+    {
+        var rawCategory = string.IsNullOrEmpty(listing.Category) ? "Other" : listing.Category;
+        if (HighEndDutyNames.Contains(listing.DutyName))
+            return "HighEndDuty";
+        return rawCategory == "BlueMage" ? "Other" : rawCategory;
+    }
+
     public static string CategoryLabel(string category) =>
         CategoryLabels.TryGetValue(category, out var label) ? label : category;
 

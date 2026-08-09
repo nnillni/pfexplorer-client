@@ -49,6 +49,15 @@ public sealed class PfScanTracker
     // NOT inferred from whatever buckets happen to show up in the batch
     // itself — a wrong/incomplete guess here just means pruning silently
     // no-ops for that bucket, not a bad prune.
+    //
+    // "BlueMage" is deliberately never a key here even though it's a real
+    // display bucket (MatchCategorizer.CategoryBucket) — a BLU-flagged
+    // listing still lives under its own native Dungeons/Trials/Raids/
+    // HighEndDuty tab in-game (the game has no dedicated Blue Mage PF tab),
+    // so PruneMissing matches these against MatchCategorizer.NativeBucket
+    // instead of CategoryBucket, which resolves back to exactly one of the
+    // real tabs below rather than "BlueMage" for every eligible category at
+    // once — see NativeBucket's own doc comment.
     private static readonly Dictionary<byte, string[]> ExpectedBucketsByTab = new()
     {
         [1] = new[] { "Roulette" },

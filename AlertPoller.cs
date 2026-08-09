@@ -571,20 +571,29 @@ public sealed class AlertPoller : IDisposable
     // (server-aggregated from other contributors) since this client has no
     // way to confirm whether those are still up.
     //
-    // Matched by MatchCategorizer.CategoryBucket, NOT the raw
-    // PfListingSearchResult.Category field — the High End Duty tab is the
-    // reason why: specific fights (see MatchCategorizer.HighEndDutyNames)
-    // get reclassified into the "HighEndDuty" bucket by duty name alone,
-    // while their raw Category field still reads "Trials"/"Raids" straight
-    // from the game (same field xivpf mirrors). Filtering on the raw field
-    // here would never match anything for that tab — an unfilled High End
-    // Duty scan would silently prune nothing, leaving stale entries (e.g.
-    // from xivpf.com) sitting there forever even after your own client
-    // proved they're gone.
+    // Matched by MatchCategorizer.NativeBucket, NOT CategoryBucket and NOT
+    // the raw PfListingSearchResult.Category field either:
+    //  - Raw Category alone: the High End Duty tab is the reason why —
+    //    specific fights (see MatchCategorizer.HighEndDutyNames) get
+    //    reclassified by duty name alone, while their raw Category field
+    //    still reads "Trials"/"Raids" straight from the game (same field
+    //    xivpf mirrors). Filtering on the raw field here would never match
+    //    anything for that tab — an unfilled High End Duty scan would
+    //    silently prune nothing, leaving stale entries (e.g. from
+    //    xivpf.com) sitting there forever even after your own client
+    //    proved they're gone.
+    //  - CategoryBucket (the display bucket): collapses every BLU-eligible
+    //    Dungeons/Trials/Raids/HighEndDuty listing into a single "BlueMage"
+    //    value, so a scan of any one of those tabs couldn't tell which BLU
+    //    listings it actually just proved gone — a BLU-flagged dungeon
+    //    party staying stale forever even after you watched it vanish from
+    //    the game's own Dungeons tab was exactly this bug. NativeBucket
+    //    resolves a BLU-flagged listing back to the one real tab it
+    //    actually lives under instead.
     public IReadOnlyList<string> PruneMissing(IReadOnlySet<string> buckets, string dataCenter, IReadOnlySet<string> seenListingIds)
     {
         var stale = Matches
-            .Where(l => buckets.Contains(MatchCategorizer.CategoryBucket(l))
+            .Where(l => buckets.Contains(MatchCategorizer.NativeBucket(l))
                 && string.Equals(l.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase)
                 && !seenListingIds.Contains(l.ListingId))
             .ToList();

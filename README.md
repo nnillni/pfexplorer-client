@@ -9,7 +9,6 @@ A Dalamud plugin that captures Party Finder listings as you browse them in-game 
 
 - **Cross-DC search** — see and filter Party Finder listings from every data center, not just the one you're currently on.
 - **Click to open** — click a listing to jump straight to it in-game; Party Finder opens (or switches) to the right category automatically.
-- **One-click travel** — by clicking the travel icon, lets you travel directly to other data centers with the right plugins.
 - **Notifications** — configurable alerts for new matches, party size changes, and listings closing, each with its own chat color, and clickable straight from the chat line.
 - **Two view modes** — a full results window (icons, description, tags, freshness) or a compact minimal view for glancing at a corner of the screen.
 - **Filters** — job, item level range, data center(s), category, and freshness (how recently a listing was reconfirmed).
