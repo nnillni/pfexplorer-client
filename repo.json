@@ -3,7 +3,7 @@
     "Author": "Nahuel Nillni",
     "Name": "PF Explorer",
     "InternalName": "PfExplorer",
-    "AssemblyVersion": "0.2.0.0",
+    "AssemblyVersion": "0.3.0.0",
     "Description": "Captures Party Finder listings as you play and shares them to pfexplorer.com, so you can search Party Finder across every data center instead of just your own.\n\nFeatures:\n- Cross-DC search — see and filter listings from every data center, not just the one you're on\n- Click a listing to jump straight to it in-game (opens Party Finder to the right category automatically)\n- One-click travel prompt to other data centers for listings you can actually reach\n- Notifications for new matches, party size changes, and listings closing — each with its own configurable chat color and clickable chat links\n- Full results window or a compact minimal view\n- Filter by job, item level, data center, category, and freshness\n- Optional background scanner keeps contributing fresh data even when you're not manually browsing Party Finder",
     "Punchline": "Captures Party Finder listings and reports them to pfexplorer for cross-client search.",
     "ApplicableVersion": "any",
@@ -18,6 +18,6 @@
     "DownloadLinkTesting": "https://github.com/nnillni/pfexplorer-client/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/nnillni/pfexplorer-client/releases/latest/download/latest.zip",
     "DownloadCount": 0,
-    "LastUpdate": "1786237446"
+    "LastUpdate": "1786277323"
   }
 ]
