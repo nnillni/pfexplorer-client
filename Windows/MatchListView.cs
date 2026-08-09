@@ -234,6 +234,19 @@ public class MatchListView : IDisposable
         ImGui.SameLine();
         DrawCategoryFilter();
 
+        // Only relevant once the Blue Mage bucket is actually selected.
+        if (_config.AlertCategory == "BlueMage")
+        {
+            ImGui.SameLine();
+            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
+            var openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook");
+            ImGui.PopFont();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Open Blue Magic Spellbook");
+            if (openSpellbook)
+                PfListingOpener.OpenBlueMageSpellbook();
+        }
+
         // Row 2: results breakdown, then play/stop + refresh (+ its own
         // countdown) on the same line.
         ImGui.TextUnformatted($"{visible.Count} results out of");
@@ -442,7 +455,7 @@ public class MatchListView : IDisposable
             var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
             var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
             var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
-                && PfBackgroundScraper.IsInOpenWorld;
+                && PfListingOpener.IsInOpenWorld;
 
             // Icon-only instead of a "Travel" text label — the column was
             // mostly empty space around that one word; the tooltip covers
@@ -460,7 +473,7 @@ public class MatchListView : IDisposable
                 string tooltip;
                 if (canTravel)
                     tooltip = $"Travel to {listing.DataCenter}";
-                else if (!PfBackgroundScraper.IsInOpenWorld)
+                else if (!PfListingOpener.IsInOpenWorld)
                     tooltip = "Can't travel right now — only available out in the open world";
                 else if (targetRegion == null)
                     // A data center we don't recognize at all (not in
@@ -746,6 +759,20 @@ public class MatchListView : IDisposable
             : MatchCategorizer.CategoryLabel(_config.AlertCategory);
         ImGui.TextUnformatted($"{categoryLabel} ({visible.Count})");
 
+        // Same as the full view's DrawCategoryFilter — only relevant once
+        // the Blue Mage bucket is actually selected.
+        if (_config.AlertCategory == "BlueMage")
+        {
+            ImGui.SameLine();
+            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
+            var openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook-minimal");
+            ImGui.PopFont();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Open Blue Magic Spellbook");
+            if (openSpellbook)
+                PfListingOpener.OpenBlueMageSpellbook();
+        }
+
         if (visible.Count == 0)
         {
             ImGui.TextDisabled("No matching listings right now.");
@@ -790,7 +817,7 @@ public class MatchListView : IDisposable
         var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
         var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
         var canTravel = (targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion))
-            && PfBackgroundScraper.IsInOpenWorld;
+            && PfListingOpener.IsInOpenWorld;
         var needsTravel = !alreadyThere;
 
         ImGui.SetCursorScreenPos(rowStart);
@@ -802,7 +829,7 @@ public class MatchListView : IDisposable
                 tooltip = "Click to view in-game";
             else if (canTravel)
                 tooltip = $"Click to travel to {listing.DataCenter} to view in-game";
-            else if (!PfBackgroundScraper.IsInOpenWorld)
+            else if (!PfListingOpener.IsInOpenWorld)
                 tooltip = "Can't travel right now — only available out in the open world";
             else
                 tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion ?? "unknown"}), and only Oceania allows cross-region travel";

@@ -96,14 +96,13 @@ public sealed class ListingUploader : IDisposable
         }
     }
 
-    // Reports listing_ids that PfBackgroundScraper's own scan positively
-    // confirmed are gone (see AlertPoller.PruneMissing — an unfilled
-    // category page not containing them, ground truth from the game
-    // itself) to the server, so they're marked expired for every other
-    // client's poll too instead of just this one's local Matches. Called
-    // fire-and-forget from PfBackgroundScraper's per-frame Tick, same
-    // reasoning as FlushAsync being timer- rather than await-driven —
-    // nothing in the scan loop can afford to block on an HTTP round trip.
+    // Reports listing_ids that PfScanTracker's own scan (fed purely by your
+    // organic PF browsing/clicks) positively confirmed are gone — see
+    // AlertPoller.PruneMissing, an unfilled category page not containing
+    // them, ground truth from the game itself — to the server, so they're
+    // marked expired for every other client's poll too instead of just this
+    // one's local Matches. Fire-and-forget, same reasoning as FlushAsync
+    // being timer- rather than await-driven.
     public async Task ExpireAsync(IReadOnlyList<string> listingIds)
     {
         if (!_config.Enabled || listingIds.Count == 0)

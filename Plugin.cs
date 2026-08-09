@@ -31,7 +31,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Configuration _config;
     private readonly ListingUploader _uploader;
     private readonly AlertPoller _alertPoller;
-    private readonly PfBackgroundScraper _backgroundScraper;
+    private readonly PfScanTracker _scanTracker;
     private readonly MatchListView _matchListView;
     private readonly WindowSystem _windowSystem = new("PfExplorer");
     private readonly StatusWindow _statusWindow;
@@ -55,7 +55,7 @@ public sealed class Plugin : IDalamudPlugin
 
         _uploader = new ListingUploader(_config, Log);
         _alertPoller = new AlertPoller(_config, Log, ChatGui, ToastGui);
-        _backgroundScraper = new PfBackgroundScraper(_config, _alertPoller, _uploader);
+        _scanTracker = new PfScanTracker(_alertPoller, _uploader);
         _matchListView = new MatchListView(_config, _alertPoller);
 
         // MatchesWindow (full) and MinimalMatchesWindow (compact) are the
@@ -68,7 +68,7 @@ public sealed class Plugin : IDalamudPlugin
         // since their constructors would otherwise need each other.
         _matchesWindow = new MatchesWindow(_matchListView);
         _minimalMatchesWindow = new MinimalMatchesWindow(_matchListView);
-        _statusWindow = new StatusWindow(_config, _uploader, _alertPoller, _backgroundScraper, _matchesWindow, _minimalMatchesWindow);
+        _statusWindow = new StatusWindow(_config, _uploader, _alertPoller, _matchesWindow, _minimalMatchesWindow);
         _matchesWindow.OnOpenOptions = () => _statusWindow.Toggle();
         _minimalMatchesWindow.OnOpenOptions = () => _statusWindow.Toggle();
         _matchesWindow.SwitchToMinimal = () => SetMinimalView(true);
@@ -105,7 +105,7 @@ public sealed class Plugin : IDalamudPlugin
 
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         PluginInterface.UiBuilder.Draw += TryInitializeDefaults;
-        PluginInterface.UiBuilder.Draw += _backgroundScraper.Tick;
+        PluginInterface.UiBuilder.Draw += _scanTracker.Tick;
         PluginInterface.UiBuilder.Draw += TrackStatusWindowTransitions;
         PluginInterface.UiBuilder.Draw += PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi += _statusWindow.Toggle;
@@ -117,22 +117,20 @@ public sealed class Plugin : IDalamudPlugin
     private void OnReceiveListing(IPartyFinderListing listing, IPartyFinderListingEventArgs _)
     {
         var dto = ListingMapper.Map(listing);
-        // Fed regardless of the Enabled/private checks below — this feeds
-        // both PfBackgroundScraper's Debug tab log ("did this category
-        // request actually return something") and its stale-match pruning,
-        // neither of which are the upload path.
-        _backgroundScraper.NotifyListingReceived(dto);
 
-        // Also unconditional, and not just for PfBackgroundScraper's own
-        // scan cycle: PfBackgroundScraper explicitly skips scanning while
-        // you have the native PF window open yourself (it would yank the
-        // category/page out from under you), so browsing manually was the
-        // one case where the alert pipeline had zero local ground truth —
-        // a listing you were staring at could still get announced "gone"
-        // by AlertPoller.PollAsync's server-diff alone. Feeding every
-        // listing the game shows you (any source, not just the scraper's)
-        // into RefreshFromScan freshens its CapturedAt/slots and clears
-        // local removal suppression exactly like a background scan does.
+        // Fed regardless of the Enabled/private checks below — this feeds
+        // both PfScanTracker's stale-match pruning and (via RefreshFromScan
+        // just below) the alert pipeline's local ground truth, neither of
+        // which are the upload path.
+        _scanTracker.NotifyListingReceived(dto);
+
+        // Also unconditional: without this, a listing you were staring at
+        // in the native PF window could still get announced "gone" by
+        // AlertPoller.PollAsync's server-diff alone. Feeding every listing
+        // the game shows you (from you opening/browsing PF yourself — the
+        // only source of ReceiveListing events) into RefreshFromScan
+        // freshens its CapturedAt/slots and clears local removal
+        // suppression.
         var localDataCenter = MatchListView.GetLocalDataCenter();
         if (localDataCenter != null)
             _alertPoller.RefreshFromScan(new[] { dto }, localDataCenter);
@@ -243,7 +241,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         PluginInterface.UiBuilder.Draw -= TryInitializeDefaults;
-        PluginInterface.UiBuilder.Draw -= _backgroundScraper.Tick;
+        PluginInterface.UiBuilder.Draw -= _scanTracker.Tick;
         PluginInterface.UiBuilder.Draw -= TrackStatusWindowTransitions;
         PluginInterface.UiBuilder.Draw -= PfListingOpener.DrawTravelConfirmation;
         PluginInterface.UiBuilder.OpenConfigUi -= _statusWindow.Toggle;

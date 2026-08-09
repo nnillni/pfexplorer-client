@@ -86,18 +86,19 @@ public sealed class AlertPoller : IDisposable
     private readonly HashSet<string> _announcedMatchIds = new();
 
     // ListingId -> when this suppression expires. Populated by PruneMissing
-    // when a complete-page scan confirms a listing is actually gone from PF
-    // — without this, the very next poll (its own ~30s timer, independent
-    // of the scan cycle) would just silently bring it right back, since the
-    // server's own "active" definition lags well behind what the game
-    // itself just told us: a row only drops out of activeOnly results once
-    // its updated_at ages past LISTING_FRESHNESS_MINUTES (5min by default),
-    // and a listing double-sourced via xivpfSync.ts's independent re-scrape
-    // sits under a completely separate DB row that can stay "active" even
-    // longer if xivpf.com's own data hasn't caught up yet. Cleared the
-    // moment a scan sees the listing again (see RefreshFromScan), so a
-    // false prune self-heals within one scan cycle instead of being stuck
-    // hidden for the full grace window below.
+    // when PfScanTracker confirms (from your own organic PF browsing) that
+    // a complete, unfilled category page no longer contains a listing —
+    // without this, the very next poll (its own ~30s timer, independent of
+    // that) would just silently bring it right back, since the server's own
+    // "active" definition lags well behind what the game itself just told
+    // us: a row only drops out of activeOnly results once its updated_at
+    // ages past LISTING_FRESHNESS_MINUTES (5min by default), and a listing
+    // double-sourced via xivpfSync.ts's independent re-scrape sits under a
+    // completely separate DB row that can stay "active" even longer if
+    // xivpf.com's own data hasn't caught up yet. Cleared the moment a scan
+    // sees the listing again (see RefreshFromScan), so a false prune
+    // self-heals within one scan cycle instead of being stuck hidden for
+    // the full grace window below.
     private readonly Dictionary<string, DateTime> _locallyRemovedListingIds = new();
     private static readonly TimeSpan LocalRemovalGrace = TimeSpan.FromMinutes(10);
 
@@ -110,17 +111,14 @@ public sealed class AlertPoller : IDisposable
 
     // Consecutive polls a previously-matching listing has been absent from
     // the server's response — PollAsync's own "gone" path (low-confidence:
-    // the server just stopped returning it, not ground truth the way
-    // PruneMissing's scan-confirmed removal is) requires this to cross
-    // MissingPollThreshold, and the listing's own freshness to have aged
-    // into red, before announcing. Absorbs the case where a listing drops
-    // out for exactly one poll right as it crosses the server's own
+    // the server just stopped returning it, not ground truth) requires this
+    // to cross MissingPollThreshold, and the listing's own freshness to have
+    // aged into red, before announcing. Absorbs the case where a listing
+    // drops out for exactly one poll right as it crosses the server's own
     // LISTING_FRESHNESS_MINUTES cutoff (which lines up almost exactly with
     // MatchFreshness's red threshold) but is still real — RefreshFromScan
-    // (fed by both PfBackgroundScraper and manual PF browsing, see
-    // Plugin.OnReceiveListing) resets an id's streak back to 0 the moment
-    // anything actually re-observes it, same self-healing idea as
-    // _locallyRemovedListingIds above.
+    // (fed by manual PF browsing, see Plugin.OnReceiveListing) resets an
+    // id's streak back to 0 the moment anything actually re-observes it.
     private readonly Dictionary<string, int> _missingPollStreak = new();
     private const int MissingPollThreshold = 2;
 
@@ -306,9 +304,10 @@ public sealed class AlertPoller : IDisposable
             }
 
             // This poll's server snapshot only reflects whatever was last
-            // actually uploaded — it doesn't know about PfBackgroundScraper's
-            // scan-driven RefreshFromScan updates, which only ever touch the
-            // local copy. Without this, every ~30s poll (running on its own
+            // actually uploaded — it doesn't know about RefreshFromScan
+            // updates fed by your own organic PF browsing (Plugin.
+            // OnReceiveListing), which only ever touch the local copy.
+            // Without this, every ~30s poll (running on its own
             // timer, independent of the scan cycle) would stomp straight
             // back over a locally fresher CapturedAt/slot state with this
             // now-stale one. Keep whichever side actually saw the listing
@@ -441,7 +440,7 @@ public sealed class AlertPoller : IDisposable
                     // including this client's own local view. Covers a
                     // listing aging out of the server's own active window or
                     // getting expired via the verified-deletion consensus,
-                    // for DCs the local scan can't directly confirm. A
+                    // for DCs your own browsing can't directly confirm. A
                     // scan-confirmed removal (PruneMissing) announces
                     // separately and immediately — ground truth from the
                     // game itself doesn't need to wait on any of this; by
@@ -501,17 +500,18 @@ public sealed class AlertPoller : IDisposable
         (string.IsNullOrEmpty(_config.AlertCategory) || MatchCategorizer.CategoryBucket(l) == _config.AlertCategory)
         && (_config.AlertFreshness < 0 || MatchFreshness.Rank(l.CapturedAt) <= _config.AlertFreshness);
 
-    // Called by PfBackgroundScraper for every scan (complete page or not —
-    // a listing this actually saw is trustworthy regardless of how many
-    // others came back alongside it) to fold fresh data straight into any
-    // Match already tracking that same listing, instead of leaving it to
-    // show party size/tags/CapturedAt as they were as of the last ~30s
-    // poll. Mutates the matched PfListingSearchResult objects in place
-    // (they're reference types with public setters, already sitting in
-    // Matches) rather than rebuilding the list, so this doesn't disturb
-    // NewMatchIds/_previousMatchingIds bookkeeping at all. Scoped to
-    // `dataCenter` for the same reason as PruneMissing below — a scan can
-    // only ever see the player's own DC.
+    // Called by Plugin.OnReceiveListing for every listing the game shows
+    // you (organic PF browsing — a listing this actually saw is
+    // trustworthy regardless of how many others came back alongside it) to
+    // fold fresh data straight into any Match already tracking that same
+    // listing, instead of leaving it to show party size/tags/CapturedAt as
+    // they were as of the last ~30s poll. Mutates the matched
+    // PfListingSearchResult objects in place (they're reference types with
+    // public setters, already sitting in Matches) rather than rebuilding
+    // the list, so this doesn't disturb NewMatchIds/_previousMatchingIds
+    // bookkeeping at all. Scoped to `dataCenter` for the same reason as
+    // PruneMissing below — organic browsing can only ever see the player's
+    // own DC.
     public int RefreshFromScan(IReadOnlyList<PfListingDto> freshListings, string dataCenter)
     {
         if (freshListings.Count == 0)
@@ -546,9 +546,9 @@ public sealed class AlertPoller : IDisposable
             match.OpenSlotJobs = fresh.OpenSlotJobs;
             match.Tags = fresh.Tags;
             match.CapturedAt = fresh.CapturedAt;
-            // Actually re-observed, from any source (background scan or you
-            // browsing PF yourself) — not just "the server still lists it".
-            // See _missingPollStreak's doc comment.
+            // Actually re-observed, from your own PF browsing — not just
+            // "the server still lists it". See _missingPollStreak's doc
+            // comment.
             _missingPollStreak.Remove(match.ListingId);
             updated++;
         }
@@ -556,22 +556,35 @@ public sealed class AlertPoller : IDisposable
         return updated;
     }
 
-    // Called by PfBackgroundScraper right after a category scan comes back
-    // with fewer than 50 listings (the game's own page cap — see
-    // PfBackgroundScraper.MaxListingsPerPage) for one of the raw categories
-    // in `rawCategories`. An unfilled page is a complete, authoritative
-    // snapshot of every listing currently active in those categories for
-    // `dataCenter` — the only DC the scan itself could have seen — so
-    // anything already in Matches under the same categories/DC that isn't
+    // Called by PfScanTracker right after a batch of ReceiveListing events
+    // from your own organic browsing (opening PF, switching a category tab,
+    // or PfListingOpener prefetching a category before jumping to a
+    // listing) settles with fewer than 50 listings total (the game's own
+    // page cap — see PfScanTracker.MaxListingsPerPage) for one or more
+    // display buckets in `buckets`. An unfilled page is a complete,
+    // authoritative snapshot of every listing currently active in those
+    // buckets for `dataCenter` — the only DC a local scan could have seen —
+    // so anything already in Matches under the same buckets/DC that isn't
     // among `seenListingIds` has actually closed/expired in-game. Dropping
     // it here means the list updates instantly instead of sitting stale
     // until the next ~30s poll. Never touches other data centers' listings
     // (server-aggregated from other contributors) since this client has no
     // way to confirm whether those are still up.
-    public IReadOnlyList<string> PruneMissing(IReadOnlySet<string> rawCategories, string dataCenter, IReadOnlySet<string> seenListingIds)
+    //
+    // Matched by MatchCategorizer.CategoryBucket, NOT the raw
+    // PfListingSearchResult.Category field — the High End Duty tab is the
+    // reason why: specific fights (see MatchCategorizer.HighEndDutyNames)
+    // get reclassified into the "HighEndDuty" bucket by duty name alone,
+    // while their raw Category field still reads "Trials"/"Raids" straight
+    // from the game (same field xivpf mirrors). Filtering on the raw field
+    // here would never match anything for that tab — an unfilled High End
+    // Duty scan would silently prune nothing, leaving stale entries (e.g.
+    // from xivpf.com) sitting there forever even after your own client
+    // proved they're gone.
+    public IReadOnlyList<string> PruneMissing(IReadOnlySet<string> buckets, string dataCenter, IReadOnlySet<string> seenListingIds)
     {
         var stale = Matches
-            .Where(l => rawCategories.Contains(l.Category)
+            .Where(l => buckets.Contains(MatchCategorizer.CategoryBucket(l))
                 && string.Equals(l.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase)
                 && !seenListingIds.Contains(l.ListingId))
             .ToList();

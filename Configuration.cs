@@ -109,19 +109,6 @@ public class Configuration : IPluginConfiguration
     // buttons toggle between.
     public bool MatchesWindowMinimal { get; set; } = false;
 
-    // Periodically cycles every PF category in the background (see
-    // PfBackgroundScraper) to keep feeding the server fresh, broad capture
-    // data even if you never manually browse PF yourself. Off by default,
-    // unlike the rest of Alert* — this is the one thing here that generates
-    // game traffic no normal player action would (continuous
-    // RequestCategoryListings calls with no PF window ever open), which is
-    // a meaningfully different risk profile from passively capturing
-    // whatever ReceiveListing events your own PF browsing already fires.
-    // Opt-in until there's more confidence in that tradeoff; capture/upload
-    // of your own organic browsing (Configuration.Enabled) doesn't depend
-    // on this at all.
-    public bool AlertBackgroundScraperEnabled { get; set; } = false;
-
     // Set once, the first time the plugin can actually resolve your
     // character's data center (see Plugin.TryInitializeDefaults) — seeds
     // AlertDataCenters with it so a fresh install isn't stuck on "Any"

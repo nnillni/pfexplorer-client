@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.ClientState.Conditions;
+using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using PfExplorer.Models;
 using PfExplorer.Windows;
@@ -13,12 +16,57 @@ namespace PfExplorer;
 // data cached, which is only true for listings your own client has actually
 // requested — most results here came from someone else's plugin/xivpf, so
 // without a fresh RequestCategoryListings first, OpenListing would silently
-// show nothing. Firing that request also happens to be exactly what feeds
-// our own capture/upload pipeline (see PfBackgroundScraper's own comment on
-// RequestCategoryListings), so a click here doubles as "go look at this"
-// and "go capture this category" at the same time.
+// show nothing. Firing that request also happens to feed our own capture/
+// upload pipeline, so a click here doubles as "go look at this" and "go
+// capture this category" at the same time.
 public static class PfListingOpener
 {
+    // Party Finder itself is unreachable while logged out, inside a duty
+    // instance, or between zones/cutscenes — RequestCategoryListings still
+    // "succeeds" in those states, it just never yields ReceiveListing
+    // calls. Shared by Open/RequestTravel (below) and MatchListView's own
+    // travel-button gating — one definition of "actually in the open world
+    // right now" instead of two that could silently drift apart.
+    public static bool IsInOpenWorld =>
+        Plugin.ClientState.IsLoggedIn
+        && !Plugin.Condition[ConditionFlag.BoundByDuty]
+        && !Plugin.Condition[ConditionFlag.BoundByDuty56]
+        && !Plugin.Condition[ConditionFlag.BoundByDuty95]
+        && !Plugin.Condition[ConditionFlag.BetweenAreas]
+        && !Plugin.Condition[ConditionFlag.BetweenAreas51]
+        && !Plugin.Condition[ConditionFlag.WatchingCutscene]
+        && !Plugin.Condition[ConditionFlag.WatchingCutscene78]
+        && !Plugin.Condition[ConditionFlag.OccupiedInCutSceneEvent];
+
+    // Raw category (PfListingSearchResult.Category) -> the byte
+    // RequestCategoryListings expects, needed by Open (below) to prefetch a
+    // specific listing's category before jumping to it. NOT DutyCategory's
+    // own bitflag enum value — the game's plain 1-based tab order instead
+    // (live-confirmed: index 4 = Trials).
+    private static readonly Dictionary<string, byte> RawCategoryToRequestByte = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Roulette"] = 1,
+        ["Dungeons"] = 2,
+        ["GuildQuests"] = 3,
+        ["Trials"] = 4,
+        ["Raids"] = 5,
+        ["HighEndDuty"] = 6,
+        ["PvP"] = 7,
+        ["GoldSaucer"] = 8,
+        ["FATEs"] = 9,
+        ["TreasureHunts"] = 10,
+        ["TheHunt"] = 11,
+        ["GatheringForays"] = 12,
+        ["DeepDungeons"] = 13,
+        ["FieldOperations"] = 14,
+        ["OccultCrescent"] = 14,
+        ["VCDungeonFinder"] = 15,
+        ["Other"] = 16,
+    };
+
+    public static byte? CategoryByteFor(string rawCategory) =>
+        RawCategoryToRequestByte.TryGetValue(rawCategory, out var value) ? value : null;
+
     // "/li" turned out to be bound to a travel plugin (e.g. Lifestream) that
     // executes a world visit immediately, with no confirmation of its own —
     // not something to fire straight from a click, since it's a much bigger
@@ -37,10 +85,10 @@ public static class PfListingOpener
     {
         // The World Visit System (and whatever "/li" is bound to) isn't
         // usable mid-duty/zoning/cutscene any more than the PF window
-        // itself is — see PfBackgroundScraper.IsInOpenWorld. Checked here
-        // too, not just in Open below, since MatchListView's Travel button
-        // calls this directly without going through Open.
-        if (!PfBackgroundScraper.IsInOpenWorld)
+        // itself is — see IsInOpenWorld above. Checked here too, not just
+        // in Open below, since MatchListView's Travel button calls this
+        // directly without going through Open.
+        if (!IsInOpenWorld)
         {
             Plugin.ToastGui.ShowError("Can't travel right now — only available out in the open world.");
             return;
@@ -54,7 +102,7 @@ public static class PfListingOpener
     {
         // Same reasoning as RequestTravel above — opening the native PF
         // window isn't meaningful mid-duty/zoning/cutscene either.
-        if (!PfBackgroundScraper.IsInOpenWorld)
+        if (!IsInOpenWorld)
         {
             Plugin.ToastGui.ShowError("Can't open Party Finder right now — only available out in the open world.");
             return;
@@ -93,8 +141,7 @@ public static class PfListingOpener
         if (agent == null)
             return;
 
-        // Only Show() if it isn't already open — same "LookingForGroup"
-        // addon check PfBackgroundScraper uses to avoid disturbing an
+        // Only Show() if it isn't already open — avoids disturbing an
         // active browse. Calling Show() again on an already-open window
         // isn't needed for anything below, so skip it rather than risk
         // resetting scroll/layout state for no reason.
@@ -106,7 +153,16 @@ public static class PfListingOpener
         // refreshes it (already on that tab) — RequestCategoryListings
         // re-requests either way, there's no separate "just switch" vs
         // "just refresh" case to distinguish here.
-        var category = PfBackgroundScraper.CategoryByteFor(listing.Category);
+        //
+        // Prefers the display bucket over the raw category — MatchCategorizer
+        // reclassifies specific fights (e.g. "The Unmaking (Extreme)") from
+        // their raw "Trials"/"Raids" category into "HighEndDuty", which IS a
+        // real PF tab; using the raw category here would silently open the
+        // wrong tab for those. Falls back to the raw category when the
+        // bucket isn't a real tab at all (e.g. "BlueMage", which is a
+        // display-only grouping over ordinary Dungeons/Trials/Raids content,
+        // not its own PF category).
+        var category = CategoryByteFor(MatchCategorizer.CategoryBucket(listing)) ?? CategoryByteFor(listing.Category);
         if (category is { } value)
             agent->RequestCategoryListings(value);
 
@@ -120,6 +176,23 @@ public static class PfListingOpener
         // whatever order those two do their own internal bookkeeping in.
         if (category is { } tab)
             agent->CategoryTab = tab;
+    }
+
+    // Unlike LookingForGroup, there's no dedicated AgentLookingForGroup-style
+    // wrapper for the Blue Magic Spellbook in ClientStructs — "/bluespellbook"
+    // is a native game text command, not a Dalamud-registered one, so
+    // ProcessCommand (which only dispatches to plugin-registered commands
+    // like "/li") silently no-ops on it. Going through AgentModule directly
+    // is the same approach every other addon-backed agent without its own
+    // wrapper uses.
+    public static unsafe void OpenBlueMageSpellbook()
+    {
+        if (Plugin.GameGui.GetAddonByName("AOZNotebook", 1).Address != IntPtr.Zero)
+            return;
+
+        var agent = Framework.Instance()->GetUIModule()->GetAgentModule()->GetAgentByInternalId(AgentId.AozNotebook);
+        if (agent != null)
+            agent->Show();
     }
 
     // Wired into Plugin's Draw hook, runs every frame regardless of
