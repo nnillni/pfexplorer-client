@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -63,6 +64,9 @@ public class StatusWindow : Window, IDisposable
         _serverUrlBuffer = config.ServerUrl;
         IsOpen = false;
 
+        // Window.Size is already scaled by Dalamud's own GlobalScale
+        // internally — a plain literal here, not ImGuiHelpers.ScaledVector2
+        // (which would double-scale it).
         Size = new Vector2(420, 500);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -405,7 +409,7 @@ public class StatusWindow : Window, IDisposable
         var currentColor = GetSwatchColor(current);
 
         using var outerId = ImRaii.PushId(id);
-        ImGui.ColorButton("##current", currentColor, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(20, 20));
+        ImGui.ColorButton("##current", currentColor, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, ImGuiHelpers.ScaledVector2(20, 20));
         ImGui.SameLine();
 
         using var combo = ImRaii.Combo("Color", $"Row {current}");
@@ -414,7 +418,7 @@ public class StatusWindow : Window, IDisposable
             foreach (var (rowId, color) in GetUiColorSwatches())
             {
                 using var rowScopedId = ImRaii.PushId((int)rowId);
-                ImGui.ColorButton("##swatch", color, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(16, 16));
+                ImGui.ColorButton("##swatch", color, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, ImGuiHelpers.ScaledVector2(16, 16));
                 ImGui.SameLine();
                 if (ImGui.Selectable($"Row {rowId}", rowId == current))
                 {
@@ -452,7 +456,7 @@ public class StatusWindow : Window, IDisposable
             return;
 
         var ilvlMin = _config.AlertIlvlMin;
-        ImGui.SetNextItemWidth(90);
+        ImGui.SetNextItemWidth(90 * ImGuiHelpers.GlobalScale);
         if (ImGui.InputInt("Min##ilvl-min", ref ilvlMin))
         {
             _config.AlertIlvlMin = Math.Max(0, ilvlMin);
@@ -463,7 +467,7 @@ public class StatusWindow : Window, IDisposable
 
         ImGui.SameLine();
         var ilvlMax = _config.AlertIlvlMax;
-        ImGui.SetNextItemWidth(90);
+        ImGui.SetNextItemWidth(90 * ImGuiHelpers.GlobalScale);
         if (ImGui.InputInt("Max##ilvl-max", ref ilvlMax))
         {
             _config.AlertIlvlMax = Math.Max(0, ilvlMax);
@@ -491,7 +495,7 @@ public class StatusWindow : Window, IDisposable
     {
         ImGui.TextUnformatted("Freshness");
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(200);
+        ImGui.SetNextItemWidth(200 * ImGuiHelpers.GlobalScale);
 
         var currentLabel = _config.AlertFreshness < 0 ? "Any" : MatchFreshness.Labels[_config.AlertFreshness];
 
@@ -634,7 +638,7 @@ public class StatusWindow : Window, IDisposable
     private void DrawJobRow(string label, string[] jobs)
     {
         ImGui.TextDisabled(label);
-        ImGui.SameLine(80);
+        ImGui.SameLine(80 * ImGuiHelpers.GlobalScale);
         for (var i = 0; i < jobs.Length; i++)
         {
             var job = jobs[i];
@@ -658,7 +662,7 @@ public class StatusWindow : Window, IDisposable
     private void DrawDataCenterRow(string region, string[] dataCenters)
     {
         ImGui.TextDisabled(region);
-        ImGui.SameLine(80);
+        ImGui.SameLine(80 * ImGuiHelpers.GlobalScale);
         for (var i = 0; i < dataCenters.Length; i++)
         {
             var dc = dataCenters[i];

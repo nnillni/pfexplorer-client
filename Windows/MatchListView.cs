@@ -6,7 +6,9 @@ using System.Numerics;
 using System.Text.RegularExpressions;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.ManagedFontAtlas;
 using Dalamud.Interface.Textures.TextureWraps;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using PfExplorer.Models;
 
@@ -149,6 +151,18 @@ public class MatchListView : IDisposable
     private readonly AlertPoller _alertPoller;
     private readonly Dictionary<string, Dalamud.Interface.Textures.ISharedImmediateTexture> _iconCache = new();
 
+    // A dedicated, smaller icon font atlas entry for the play/stop toggle —
+    // rather than ImGui.SetWindowFontScale, which doesn't rebuild the font
+    // at a different size, it just stretches the already-rasterized
+    // default-size glyph texture (fine near 1.0x, visibly blurry the
+    // further the user's own font size/global scale settings push that
+    // base texture away from this target). Sized relative to
+    // FontDefaultSizePx — which already accounts for the user's own font
+    // size setting — via OnPreBuild (re-run whenever the atlas rebuilds,
+    // e.g. on a font/scale settings change) so this stays proportionally
+    // correct instead of a fixed pixel guess baked in once at startup.
+    private readonly IFontHandle _smallIconFont;
+
     private string? _localDataCenter;
     private string _searchText = "";
 
@@ -156,6 +170,12 @@ public class MatchListView : IDisposable
     {
         _config = config;
         _alertPoller = alertPoller;
+
+        _smallIconFont = Plugin.PluginInterface.UiBuilder.FontAtlas.NewDelegateFontHandle(e => e.OnPreBuild(
+            tk => tk.AddFontAwesomeIconFont(new()
+            {
+                SizePx = Plugin.PluginInterface.UiBuilder.FontDefaultSizePx * 0.85f,
+            })));
     }
 
     // listHeight <= 0 fills whatever vertical space is left in the current
@@ -216,12 +236,12 @@ public class MatchListView : IDisposable
 
         // Row 1: search, category tab filter — both answer "what am I even
         // looking at".
-        ImGui.SetNextItemWidth(160);
+        ImGui.SetNextItemWidth(160 * ImGuiHelpers.GlobalScale);
         var searchIsInvalid = !string.IsNullOrEmpty(_searchText) && TryBuildSearchRegex(_searchText) == null;
         using (ImRaii.PushColor(ImGuiCol.Border, new Vector4(1f, 0.4f, 0.4f, 1f), searchIsInvalid))
         // Default FramePadding makes this noticeably taller than the
         // SmallButtons on the row below — shrink it to match.
-        using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(4, 2)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, ImGuiHelpers.ScaledVector2(4, 2)))
         {
             ImGui.InputTextWithHint("##pfexplorer-search", "Search / Regex", ref _searchText, 200);
         }
@@ -272,8 +292,8 @@ public class MatchListView : IDisposable
                 // Faint fill so the text itself stays readable, plus an
                 // underline right under the baseline — "highlighted", not
                 // just outlined.
-                drawList.AddRectFilled(rankMin, rankMax, ImGui.GetColorU32(fillColor), 2f);
-                drawList.AddLine(new Vector2(rankMin.X, rankMax.Y), new Vector2(rankMax.X, rankMax.Y), ImGui.GetColorU32(rankColor), 2f);
+                drawList.AddRectFilled(rankMin, rankMax, ImGui.GetColorU32(fillColor), 2f * ImGuiHelpers.GlobalScale);
+                drawList.AddLine(new Vector2(rankMin.X, rankMax.Y), new Vector2(rankMax.X, rankMax.Y), ImGui.GetColorU32(rankColor), 2f * ImGuiHelpers.GlobalScale);
             }
 
             if (ImGui.IsItemHovered())
@@ -291,12 +311,8 @@ public class MatchListView : IDisposable
         ImGui.SameLine();
         var isRunning = _config.AlertEnabled;
         bool toggled;
-        using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
-        {
-            ImGui.SetWindowFontScale(0.85f);
+        using (_smallIconFont.Push())
             toggled = ImGui.SmallButton($"{(isRunning ? FontAwesomeIcon.Stop : FontAwesomeIcon.Play).ToIconString()}##alert-toggle");
-            ImGui.SetWindowFontScale(1f);
-        }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(isRunning ? "Stop polling" : "Start polling");
         if (toggled)
@@ -343,17 +359,17 @@ public class MatchListView : IDisposable
         // tint to actually read as a separator — pushed to a more visible
         // (still subtle) gray below so rows are clearly delimited.
         using (ImRaii.PushColor(ImGuiCol.TableBorderLight, new Vector4(1f, 1f, 1f, 0.16f)))
-        using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, ImGuiHelpers.ScaledVector2(6f, 4f)))
         using (var table = ImRaii.Table("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
         {
             if (table)
             {
                 // Wide enough for two 22x22 icons + gap (Blue Mage rows) as well
                 // as the normal single 32x32 icon.
-                ImGui.TableSetupColumn("##icon", ImGuiTableColumnFlags.WidthFixed, 50);
+                ImGui.TableSetupColumn("##icon", ImGuiTableColumnFlags.WidthFixed, 50 * ImGuiHelpers.GlobalScale);
                 ImGui.TableSetupColumn("##duty", ImGuiTableColumnFlags.WidthStretch);
-                ImGui.TableSetupColumn("##world", ImGuiTableColumnFlags.WidthFixed, 120);
-                ImGui.TableSetupColumn("##travel", ImGuiTableColumnFlags.WidthFixed, 36);
+                ImGui.TableSetupColumn("##world", ImGuiTableColumnFlags.WidthFixed, 120 * ImGuiHelpers.GlobalScale);
+                ImGui.TableSetupColumn("##travel", ImGuiTableColumnFlags.WidthFixed, 36 * ImGuiHelpers.GlobalScale);
 
                 foreach (var listing in visible)
                     DrawMatchRow(listing);
@@ -393,7 +409,7 @@ public class MatchListView : IDisposable
         using (ImRaii.Group())
         {
             var isDualIcon = MatchCategorizer.CategoryBucket(listing) == "BlueMage" && listing.Category != "BlueMage";
-            DrawCategoryIcons(listing, isDualIcon ? 22 : 32, static () => { });
+            DrawCategoryIcons(listing, (isDualIcon ? 22 : 32) * ImGuiHelpers.GlobalScale, static () => { });
         }
         HandleColumnClick();
 
@@ -538,7 +554,7 @@ public class MatchListView : IDisposable
     // place instead of needing the Options window open just to change tabs.
     private void DrawCategoryFilter()
     {
-        ImGui.SetNextItemWidth(160);
+        ImGui.SetNextItemWidth(160 * ImGuiHelpers.GlobalScale);
 
         // Counted against whatever the freshness filter currently allows
         // through (same cumulative "at least this fresh" rule Draw applies
@@ -643,7 +659,7 @@ public class MatchListView : IDisposable
         void NextItem()
         {
             if (!firstItem)
-                ImGui.SameLine(0, 3);
+                ImGui.SameLine(0, 3 * ImGuiHelpers.GlobalScale);
             firstItem = false;
         }
 
@@ -699,9 +715,9 @@ public class MatchListView : IDisposable
     private static void DrawSlotSquare(Vector4 color, float alpha, string tooltip)
     {
         var drawColor = new Vector4(color.X, color.Y, color.Z, color.W * alpha);
-        var size = new Vector2(14, 14);
+        var size = ImGuiHelpers.ScaledVector2(14, 14);
         var pos = ImGui.GetCursorScreenPos();
-        ImGui.GetWindowDrawList().AddRectFilled(pos, pos + size, ImGui.GetColorU32(drawColor), 2f);
+        ImGui.GetWindowDrawList().AddRectFilled(pos, pos + size, ImGui.GetColorU32(drawColor), 2f * ImGuiHelpers.GlobalScale);
         ImGui.Dummy(size);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(tooltip);
@@ -725,7 +741,7 @@ public class MatchListView : IDisposable
             {
                 ImGui.Image(typeIcon.Handle, new Vector2(size, size));
                 onEachIcon();
-                ImGui.SameLine(0, 2);
+                ImGui.SameLine(0, 2 * ImGuiHelpers.GlobalScale);
             }
 
             var blueMageIcon = GetCategoryIcon("BlueMage");
@@ -790,7 +806,7 @@ public class MatchListView : IDisposable
         // (FreshnessBg) — painted manually since minimal mode isn't a table
         // here (no TableSetBgColor to lean on), sized to cover the 22px
         // icon plus a little breathing room.
-        var rowHeight = Math.Max(22f, ImGui.GetTextLineHeight()) + 4f;
+        var rowHeight = Math.Max(22f * ImGuiHelpers.GlobalScale, ImGui.GetTextLineHeight()) + 4f * ImGuiHelpers.GlobalScale;
         var rowStart = ImGui.GetCursorScreenPos();
         var rowWidth = ImGui.GetContentRegionAvail().X;
         var rowEnd = new Vector2(rowStart.X + rowWidth, rowStart.Y + rowHeight);
@@ -834,8 +850,8 @@ public class MatchListView : IDisposable
         }
         ImGui.SetCursorScreenPos(rowStart);
 
-        DrawCategoryIcons(listing, 22, static () => { });
-        ImGui.SameLine(0, 4);
+        DrawCategoryIcons(listing, 22 * ImGuiHelpers.GlobalScale, static () => { });
+        ImGui.SameLine(0, 4 * ImGuiHelpers.GlobalScale);
         ImGui.TextDisabled($"({listing.SlotsFilled}/{listing.SlotsAvailable})");
         ImGui.SameLine();
         ImGui.TextUnformatted(dutyName);
@@ -857,7 +873,7 @@ public class MatchListView : IDisposable
             // the row itself already handles the click. Dimmed when travel
             // isn't even possible, same distinction the full table's
             // disabled Travel button makes.
-            ImGui.SameLine(rowWidth - 18);
+            ImGui.SameLine(rowWidth - 18 * ImGuiHelpers.GlobalScale);
             using (ImRaii.PushColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f)))
             using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
                 ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
@@ -877,7 +893,7 @@ public class MatchListView : IDisposable
         // wherever the last SameLine chain ended, not at the row's actual
         // bottom — explicitly advance past the row (matching the Selectable's
         // own height) so the next row starts in the right place.
-        ImGui.SetCursorScreenPos(new Vector2(rowStart.X, rowEnd.Y + 1));
+        ImGui.SetCursorScreenPos(new Vector2(rowStart.X, rowEnd.Y + 1 * ImGuiHelpers.GlobalScale));
     }
 
     private static TimeSpan ElapsedSince(string capturedAt)
@@ -917,6 +933,7 @@ public class MatchListView : IDisposable
 
     public void Dispose()
     {
+        _smallIconFont.Dispose();
         // Textures came from ITextureProvider.GetFromFile, which is a
         // shared/cached lookup by path — Dalamud owns that lifecycle, this
         // just drops our own references to it.

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using PfExplorer.Models;
@@ -212,7 +213,9 @@ public static class PfListingOpener
             // a chat link's click callback isn't. Offset right/down a
             // little so the popup doesn't open directly under the cursor.
             var clickPos = ImGui.GetMousePos();
-            ImGui.SetNextWindowPos(new Vector2(clickPos.X + 12, clickPos.Y + 8));
+            ImGui.SetNextWindowPos(new Vector2(
+                clickPos.X + 12 * ImGuiHelpers.GlobalScale,
+                clickPos.Y + 8 * ImGuiHelpers.GlobalScale));
             ImGui.OpenPopup(TravelPopupId);
             _travelPopupNeedsOpen = false;
         }
