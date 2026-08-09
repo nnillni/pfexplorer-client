@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Textures.TextureWraps;
+using Dalamud.Interface.Utility.Raii;
 using PfExplorer.Models;
 
 namespace PfExplorer.Windows;
@@ -217,19 +218,15 @@ public class MatchListView : IDisposable
         // looking at".
         ImGui.SetNextItemWidth(160);
         var searchIsInvalid = !string.IsNullOrEmpty(_searchText) && TryBuildSearchRegex(_searchText) == null;
-        if (searchIsInvalid)
-            ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(1f, 0.4f, 0.4f, 1f));
+        using (ImRaii.PushColor(ImGuiCol.Border, new Vector4(1f, 0.4f, 0.4f, 1f), searchIsInvalid))
         // Default FramePadding makes this noticeably taller than the
         // SmallButtons on the row below — shrink it to match.
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 2));
-        ImGui.InputTextWithHint("##pfexplorer-search", "Search / Regex", ref _searchText, 200);
-        ImGui.PopStyleVar();
-        if (searchIsInvalid)
+        using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(4, 2)))
         {
-            ImGui.PopStyleColor();
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Invalid regex — showing unfiltered results.");
+            ImGui.InputTextWithHint("##pfexplorer-search", "Search / Regex", ref _searchText, 200);
         }
+        if (searchIsInvalid && ImGui.IsItemHovered())
+            ImGui.SetTooltip("Invalid regex — showing unfiltered results.");
 
         ImGui.SameLine();
         DrawCategoryFilter();
@@ -238,9 +235,9 @@ public class MatchListView : IDisposable
         if (_config.AlertCategory == "BlueMage")
         {
             ImGui.SameLine();
-            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
-            var openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook");
-            ImGui.PopFont();
+            bool openSpellbook;
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook");
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Open Blue Magic Spellbook");
             if (openSpellbook)
@@ -262,9 +259,8 @@ public class MatchListView : IDisposable
             // single selected rank.
             var isIncluded = _config.AlertFreshness >= 0 && rank <= _config.AlertFreshness;
 
-            ImGui.PushStyleColor(ImGuiCol.Text, MatchFreshness.Colors[rank]);
-            ImGui.TextUnformatted($"({freshnessCounts[rank]})");
-            ImGui.PopStyleColor();
+            using (ImRaii.PushColor(ImGuiCol.Text, MatchFreshness.Colors[rank]))
+                ImGui.TextUnformatted($"({freshnessCounts[rank]})");
 
             if (isIncluded)
             {
@@ -294,11 +290,13 @@ public class MatchListView : IDisposable
 
         ImGui.SameLine();
         var isRunning = _config.AlertEnabled;
-        ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
-        ImGui.SetWindowFontScale(0.85f);
-        var toggled = ImGui.SmallButton($"{(isRunning ? FontAwesomeIcon.Stop : FontAwesomeIcon.Play).ToIconString()}##alert-toggle");
-        ImGui.SetWindowFontScale(1f);
-        ImGui.PopFont();
+        bool toggled;
+        using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+        {
+            ImGui.SetWindowFontScale(0.85f);
+            toggled = ImGui.SmallButton($"{(isRunning ? FontAwesomeIcon.Stop : FontAwesomeIcon.Play).ToIconString()}##alert-toggle");
+            ImGui.SetWindowFontScale(1f);
+        }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(isRunning ? "Stop polling" : "Start polling");
         if (toggled)
@@ -313,19 +311,21 @@ public class MatchListView : IDisposable
         }
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(!_alertPoller.CanManualRefresh);
-        var refreshLabel = _alertPoller.NextPollAt is { } nextPoll
-            ? $"Refresh ({FormatElapsed(nextPoll - DateTime.UtcNow)})"
-            : "Refresh";
-        if (ImGui.SmallButton(refreshLabel))
+        bool refreshClicked;
+        using (ImRaii.Disabled(!_alertPoller.CanManualRefresh))
+        {
+            var refreshLabel = _alertPoller.NextPollAt is { } nextPoll
+                ? $"Refresh ({FormatElapsed(nextPoll - DateTime.UtcNow)})"
+                : "Refresh";
+            refreshClicked = ImGui.SmallButton(refreshLabel);
+        }
+        if (refreshClicked)
             _alertPoller.RequestPoll();
-        ImGui.EndDisabled();
 
         if (_alertPoller.LastError is { } alertError)
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-            ImGui.TextWrapped($"Last error: {alertError}");
-            ImGui.PopStyleColor();
+            using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f)))
+                ImGui.TextWrapped($"Last error: {alertError}");
         }
 
         if (visible.Count == 0)
@@ -342,24 +342,24 @@ public class MatchListView : IDisposable
         // BordersInnerH alone renders too faint against the freshness row
         // tint to actually read as a separator — pushed to a more visible
         // (still subtle) gray below so rows are clearly delimited.
-        ImGui.PushStyleColor(ImGuiCol.TableBorderLight, new Vector4(1f, 1f, 1f, 0.16f));
-        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f));
-        if (ImGui.BeginTable("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
+        using (ImRaii.PushColor(ImGuiCol.TableBorderLight, new Vector4(1f, 1f, 1f, 0.16f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f)))
         {
-            // Wide enough for two 22x22 icons + gap (Blue Mage rows) as well
-            // as the normal single 32x32 icon.
-            ImGui.TableSetupColumn("##icon", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("##duty", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("##world", ImGuiTableColumnFlags.WidthFixed, 120);
-            ImGui.TableSetupColumn("##travel", ImGuiTableColumnFlags.WidthFixed, 36);
+            if (ImGui.BeginTable("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
+            {
+                // Wide enough for two 22x22 icons + gap (Blue Mage rows) as well
+                // as the normal single 32x32 icon.
+                ImGui.TableSetupColumn("##icon", ImGuiTableColumnFlags.WidthFixed, 50);
+                ImGui.TableSetupColumn("##duty", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("##world", ImGuiTableColumnFlags.WidthFixed, 120);
+                ImGui.TableSetupColumn("##travel", ImGuiTableColumnFlags.WidthFixed, 36);
 
-            foreach (var listing in visible)
-                DrawMatchRow(listing);
+                foreach (var listing in visible)
+                    DrawMatchRow(listing);
 
-            ImGui.EndTable();
+                ImGui.EndTable();
+            }
         }
-        ImGui.PopStyleVar();
-        ImGui.PopStyleColor();
 
         ImGui.EndChild();
     }
@@ -401,12 +401,10 @@ public class MatchListView : IDisposable
 
         ImGui.TableNextColumn();
         ImGui.BeginGroup();
-        if (isNew)
-            ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
-        ImGui.TextUnformatted(dutyName);
+        using (ImRaii.PushColor(ImGuiCol.Text, GoldColor, isNew))
+            ImGui.TextUnformatted(dutyName);
         if (isNew)
         {
-            ImGui.PopStyleColor();
             ImGui.SameLine();
             ImGui.TextDisabled("(new)");
         }
@@ -426,18 +424,16 @@ public class MatchListView : IDisposable
                 ImGui.SameLine();
             firstTag = false;
 
-            ImGui.PushStyleColor(ImGuiCol.Text, meta.Color);
-            ImGui.TextUnformatted($"[{meta.Label}]");
-            ImGui.PopStyleColor();
+            using (ImRaii.PushColor(ImGuiCol.Text, meta.Color))
+                ImGui.TextUnformatted($"[{meta.Label}]");
         }
         ImGui.EndGroup();
         HandleColumnClick();
 
         ImGui.TableNextColumn();
         ImGui.BeginGroup();
-        ImGui.PushStyleColor(ImGuiCol.Text, Vector4.One);
-        ImGui.TextWrapped($"{listing.Name} ({listing.World})");
-        ImGui.PopStyleColor();
+        using (ImRaii.PushColor(ImGuiCol.Text, Vector4.One))
+            ImGui.TextWrapped($"{listing.Name} ({listing.World})");
         ImGui.TextDisabled(FormatLastUpdated(listing.CapturedAt));
         ImGui.EndGroup();
         HandleColumnClick();
@@ -460,11 +456,10 @@ public class MatchListView : IDisposable
             // Icon-only instead of a "Travel" text label — the column was
             // mostly empty space around that one word; the tooltip covers
             // what it does without needing to spell it out.
-            ImGui.BeginDisabled(!canTravel);
-            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
-            var clicked = ImGui.SmallButton($"{FontAwesomeIcon.PlaneDeparture.ToIconString()}##travel-{listing.Id}");
-            ImGui.PopFont();
-            ImGui.EndDisabled();
+            bool clicked;
+            using (ImRaii.Disabled(!canTravel))
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                clicked = ImGui.SmallButton($"{FontAwesomeIcon.PlaneDeparture.ToIconString()}##travel-{listing.Id}");
             // BeginDisabled makes IsItemHovered() return false by default —
             // AllowWhenDisabled is needed to still get the tooltip telling
             // you *why* it's disabled, which is the whole point here.
@@ -588,14 +583,12 @@ public class MatchListView : IDisposable
         var currentCount = CountFor(currentValue);
         var currentIsZero = currentCount == 0;
 
-        if (currentIsZero)
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
         // HeightLargest: let the popup grow to fit every category instead
         // of ImGui's default ~8-item scroll window — there are only ~17
         // entries total, easily fits without needing to scroll to find one.
-        var comboOpen = ImGui.BeginCombo("##pfexplorer-category-filter", $"{currentLabel} ({currentCount})", ImGuiComboFlags.HeightLargest);
-        if (currentIsZero)
-            ImGui.PopStyleColor();
+        bool comboOpen;
+        using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f), currentIsZero))
+            comboOpen = ImGui.BeginCombo("##pfexplorer-category-filter", $"{currentLabel} ({currentCount})", ImGuiComboFlags.HeightLargest);
 
         if (comboOpen)
         {
@@ -605,16 +598,15 @@ public class MatchListView : IDisposable
                 var isZero = count == 0;
                 var isSelected = value == _config.AlertCategory;
 
-                if (isZero)
-                    ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-                if (ImGui.Selectable($"{label} ({count})", isSelected))
+                bool selected;
+                using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f), isZero))
+                    selected = ImGui.Selectable($"{label} ({count})", isSelected);
+                if (selected)
                 {
                     _config.AlertCategory = value;
                     _config.Save();
                     _alertPoller.RequestPoll();
                 }
-                if (isZero)
-                    ImGui.PopStyleColor();
 
                 if (isSelected)
                     ImGui.SetItemDefaultFocus();
@@ -764,9 +756,9 @@ public class MatchListView : IDisposable
         if (_config.AlertCategory == "BlueMage")
         {
             ImGui.SameLine();
-            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
-            var openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook-minimal");
-            ImGui.PopFont();
+            bool openSpellbook;
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                openSpellbook = ImGui.SmallButton($"{FontAwesomeIcon.Book.ToIconString()}##open-blue-spellbook-minimal");
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Open Blue Magic Spellbook");
             if (openSpellbook)
@@ -861,11 +853,9 @@ public class MatchListView : IDisposable
             // isn't even possible, same distinction the full table's
             // disabled Travel button makes.
             ImGui.SameLine(rowWidth - 18);
-            ImGui.PushStyleColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f));
-            ImGui.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon);
-            ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
-            ImGui.PopFont();
-            ImGui.PopStyleColor();
+            using (ImRaii.PushColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f)))
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
         }
 
         if (rowClicked)

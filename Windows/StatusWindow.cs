@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -250,9 +251,8 @@ public class StatusWindow : Window, IDisposable
         if (_uploader.LastError is { } error)
         {
             ImGui.Spacing();
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
-            ImGui.TextWrapped($"Last error: {error}");
-            ImGui.PopStyleColor();
+            using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f)))
+                ImGui.TextWrapped($"Last error: {error}");
         }
     }
 
@@ -405,7 +405,7 @@ public class StatusWindow : Window, IDisposable
         var current = get();
         var currentColor = GetSwatchColor(current);
 
-        ImGui.PushID(id);
+        using var outerId = ImRaii.PushId(id);
         ImGui.ColorButton("##current", currentColor, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(20, 20));
         ImGui.SameLine();
 
@@ -413,7 +413,7 @@ public class StatusWindow : Window, IDisposable
         {
             foreach (var (rowId, color) in GetUiColorSwatches())
             {
-                ImGui.PushID((int)rowId);
+                using var rowScopedId = ImRaii.PushId((int)rowId);
                 ImGui.ColorButton("##swatch", color, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(16, 16));
                 ImGui.SameLine();
                 if (ImGui.Selectable($"Row {rowId}", rowId == current))
@@ -421,11 +421,9 @@ public class StatusWindow : Window, IDisposable
                     set((ushort)rowId);
                     _config.Save();
                 }
-                ImGui.PopID();
             }
             ImGui.EndCombo();
         }
-        ImGui.PopID();
     }
 
     // Collapsed by default — the header itself always shows a summary of
@@ -504,14 +502,10 @@ public class StatusWindow : Window, IDisposable
         // e.g. "Green" shows green whether the dropdown is open or closed,
         // not just while picking. "Any" has no single status to match, so
         // it stays the default text color.
-        var previewColorPushed = _config.AlertFreshness >= 0;
-        if (previewColorPushed)
-            ImGui.PushStyleColor(ImGuiCol.Text, MatchFreshness.Colors[_config.AlertFreshness]);
-
-        var comboOpen = ImGui.BeginCombo("##freshness-filter", currentLabel);
-
-        if (previewColorPushed)
-            ImGui.PopStyleColor();
+        Vector4? previewColor = _config.AlertFreshness >= 0 ? MatchFreshness.Colors[_config.AlertFreshness] : null;
+        bool comboOpen;
+        using (ImRaii.PushColor(ImGuiCol.Text, previewColor))
+            comboOpen = ImGui.BeginCombo("##freshness-filter", currentLabel);
 
         if (comboOpen)
         {
@@ -529,14 +523,15 @@ public class StatusWindow : Window, IDisposable
             for (var rank = 0; rank < MatchFreshness.Labels.Length; rank++)
             {
                 var isSelected = _config.AlertFreshness == rank;
-                ImGui.PushStyleColor(ImGuiCol.Text, MatchFreshness.Colors[rank]);
-                if (ImGui.Selectable(MatchFreshness.Labels[rank], isSelected))
+                bool selected;
+                using (ImRaii.PushColor(ImGuiCol.Text, MatchFreshness.Colors[rank]))
+                    selected = ImGui.Selectable(MatchFreshness.Labels[rank], isSelected);
+                if (selected)
                 {
                     _config.AlertFreshness = rank;
                     _config.Save();
                     _alertPoller.RequestPoll();
                 }
-                ImGui.PopStyleColor();
 
                 if (isSelected)
                     ImGui.SetItemDefaultFocus();
@@ -573,36 +568,39 @@ public class StatusWindow : Window, IDisposable
         // so e.g. "New result found" actually reads green when that's what
         // AlertNewMatchColor is set to, matching what you'll actually see
         // in chat, not just a swatch floating unrelated next to plain text.
-        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertNewMatchColor));
         var onNewMatch = _config.AlertNotifyOnNewMatch;
-        if (ImGui.Checkbox("New result found", ref onNewMatch))
+        bool newMatchChanged;
+        using (ImRaii.PushColor(ImGuiCol.Text, GetSwatchColor(_config.AlertNewMatchColor)))
+            newMatchChanged = ImGui.Checkbox("New result found", ref onNewMatch);
+        if (newMatchChanged)
         {
             _config.AlertNotifyOnNewMatch = onNewMatch;
             _config.Save();
         }
-        ImGui.PopStyleColor();
         ImGui.SameLine();
         DrawColorPicker("##color-new", () => _config.AlertNewMatchColor, v => _config.AlertNewMatchColor = v);
 
-        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertPartyChangeColor));
         var onPartyChange = _config.AlertNotifyOnPartyChange;
-        if (ImGui.Checkbox("Party size changed", ref onPartyChange))
+        bool partyChangeChanged;
+        using (ImRaii.PushColor(ImGuiCol.Text, GetSwatchColor(_config.AlertPartyChangeColor)))
+            partyChangeChanged = ImGui.Checkbox("Party size changed", ref onPartyChange);
+        if (partyChangeChanged)
         {
             _config.AlertNotifyOnPartyChange = onPartyChange;
             _config.Save();
         }
-        ImGui.PopStyleColor();
         ImGui.SameLine();
         DrawColorPicker("##color-changed", () => _config.AlertPartyChangeColor, v => _config.AlertPartyChangeColor = v);
 
-        ImGui.PushStyleColor(ImGuiCol.Text, GetSwatchColor(_config.AlertRemovedColor));
         var onRemoved = _config.AlertNotifyOnRemoved;
-        if (ImGui.Checkbox("Result no longer available", ref onRemoved))
+        bool removedChanged;
+        using (ImRaii.PushColor(ImGuiCol.Text, GetSwatchColor(_config.AlertRemovedColor)))
+            removedChanged = ImGui.Checkbox("Result no longer available", ref onRemoved);
+        if (removedChanged)
         {
             _config.AlertNotifyOnRemoved = onRemoved;
             _config.Save();
         }
-        ImGui.PopStyleColor();
         ImGui.SameLine();
         DrawColorPicker("##color-removed", () => _config.AlertRemovedColor, v => _config.AlertRemovedColor = v);
 
