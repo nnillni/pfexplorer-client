@@ -74,8 +74,8 @@ public static class PfListingOpener
     public static byte? CategoryByteFor(string rawCategory) =>
         RawCategoryToRequestByte.TryGetValue(rawCategory, out var value) ? value : null;
 
-    // "/li" turned out to be bound to a travel plugin (e.g. Lifestream) that
-    // executes a world visit immediately, with no confirmation of its own —
+    // "/li" turned out to be bound to a travel plugin that executes a world
+    // visit immediately, with no confirmation of its own —
     // not something to fire straight from a click, since it's a much bigger
     // deal than opening a window. DrawTravelConfirmation (wired into
     // Plugin's Draw hook) renders an actual Yes/No popup instead; this just
@@ -295,7 +295,18 @@ public static class PfListingOpener
 
             if (ImGui.Button("Travel"))
             {
-                Plugin.CommandManager.ProcessCommand($"/li {pending.DataCenter}");
+                // ProcessCommand only dispatches to plugin-registered
+                // commands (see OpenBlueMageSpellbook's comment above) and
+                // returns false silently if nothing owns "/li" — unlike
+                // actually typing it in the chat box, nothing shows up on
+                // screen in that case. Surface that ourselves so "no travel
+                // plugin installed" looks like an error instead of a dead
+                // click.
+                if (!Plugin.CommandManager.ProcessCommand($"/li {pending.DataCenter}"))
+                {
+                    Plugin.ChatGui.PrintError("/li command not found.");
+                }
+
                 _pendingTravel = null;
                 ImGui.CloseCurrentPopup();
             }
