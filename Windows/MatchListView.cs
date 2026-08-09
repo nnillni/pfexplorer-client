@@ -334,7 +334,7 @@ public class MatchListView : IDisposable
             return;
         }
 
-        ImGui.BeginChild("##alert-matches", new Vector2(0, listHeight), true);
+        using var matchesChild = ImRaii.Child("##alert-matches", new Vector2(0, listHeight), true);
         // A table instead of one big vertical text block per listing — icon,
         // duty (+ description/tags stacked within just that cell), world/DC/
         // recruiter, and the travel button all sit side by side per row,
@@ -344,8 +344,9 @@ public class MatchListView : IDisposable
         // (still subtle) gray below so rows are clearly delimited.
         using (ImRaii.PushColor(ImGuiCol.TableBorderLight, new Vector4(1f, 1f, 1f, 0.16f)))
         using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f)))
+        using (var table = ImRaii.Table("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
         {
-            if (ImGui.BeginTable("##alert-matches-table", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
+            if (table)
             {
                 // Wide enough for two 22x22 icons + gap (Blue Mage rows) as well
                 // as the normal single 32x32 icon.
@@ -356,12 +357,8 @@ public class MatchListView : IDisposable
 
                 foreach (var listing in visible)
                     DrawMatchRow(listing);
-
-                ImGui.EndTable();
             }
         }
-
-        ImGui.EndChild();
     }
 
     private void DrawMatchRow(PfListingSearchResult listing)
@@ -393,49 +390,52 @@ public class MatchListView : IDisposable
         ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(FreshnessBg(MatchFreshness.Rank(listing.CapturedAt))));
 
         ImGui.TableNextColumn();
-        ImGui.BeginGroup();
-        var isDualIcon = MatchCategorizer.CategoryBucket(listing) == "BlueMage" && listing.Category != "BlueMage";
-        DrawCategoryIcons(listing, isDualIcon ? 22 : 32, static () => { });
-        ImGui.EndGroup();
+        using (ImRaii.Group())
+        {
+            var isDualIcon = MatchCategorizer.CategoryBucket(listing) == "BlueMage" && listing.Category != "BlueMage";
+            DrawCategoryIcons(listing, isDualIcon ? 22 : 32, static () => { });
+        }
         HandleColumnClick();
 
         ImGui.TableNextColumn();
-        ImGui.BeginGroup();
-        using (ImRaii.PushColor(ImGuiCol.Text, GoldColor, isNew))
-            ImGui.TextUnformatted(dutyName);
-        if (isNew)
+        using (ImRaii.Group())
         {
-            ImGui.SameLine();
-            ImGui.TextDisabled("(new)");
-        }
-
-        if (!_config.AlertHideDescription && !string.IsNullOrEmpty(listing.Description))
-            ImGui.TextWrapped(listing.Description);
-
-        DrawSlots(listing);
-
-        var firstTag = true;
-        foreach (var tag in listing.Tags)
-        {
-            if (!TagMeta.TryGetValue(tag, out var meta))
-                continue;
-
-            if (!firstTag)
+            using (ImRaii.PushColor(ImGuiCol.Text, GoldColor, isNew))
+                ImGui.TextUnformatted(dutyName);
+            if (isNew)
+            {
                 ImGui.SameLine();
-            firstTag = false;
+                ImGui.TextDisabled("(new)");
+            }
 
-            using (ImRaii.PushColor(ImGuiCol.Text, meta.Color))
-                ImGui.TextUnformatted($"[{meta.Label}]");
+            if (!_config.AlertHideDescription && !string.IsNullOrEmpty(listing.Description))
+                ImGui.TextWrapped(listing.Description);
+
+            DrawSlots(listing);
+
+            var firstTag = true;
+            foreach (var tag in listing.Tags)
+            {
+                if (!TagMeta.TryGetValue(tag, out var meta))
+                    continue;
+
+                if (!firstTag)
+                    ImGui.SameLine();
+                firstTag = false;
+
+                using (ImRaii.PushColor(ImGuiCol.Text, meta.Color))
+                    ImGui.TextUnformatted($"[{meta.Label}]");
+            }
         }
-        ImGui.EndGroup();
         HandleColumnClick();
 
         ImGui.TableNextColumn();
-        ImGui.BeginGroup();
-        using (ImRaii.PushColor(ImGuiCol.Text, Vector4.One))
-            ImGui.TextWrapped($"{listing.Name} ({listing.World})");
-        ImGui.TextDisabled(FormatLastUpdated(listing.CapturedAt));
-        ImGui.EndGroup();
+        using (ImRaii.Group())
+        {
+            using (ImRaii.PushColor(ImGuiCol.Text, Vector4.One))
+                ImGui.TextWrapped($"{listing.Name} ({listing.World})");
+            ImGui.TextDisabled(FormatLastUpdated(listing.CapturedAt));
+        }
         HandleColumnClick();
 
         ImGui.TableNextColumn();
@@ -586,33 +586,38 @@ public class MatchListView : IDisposable
         // HeightLargest: let the popup grow to fit every category instead
         // of ImGui's default ~8-item scroll window — there are only ~17
         // entries total, easily fits without needing to scroll to find one.
-        bool comboOpen;
+        // The text-color push is scoped tightly around just the combo's own
+        // Begin call — it colors the closed preview, not the dropdown body
+        // once it's open, so it can't stay pushed for the ImRaii.Combo's
+        // whole using scope below.
+        ImRaii.ComboDisposable combo;
         using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f), currentIsZero))
-            comboOpen = ImGui.BeginCombo("##pfexplorer-category-filter", $"{currentLabel} ({currentCount})", ImGuiComboFlags.HeightLargest);
+            combo = ImRaii.Combo("##pfexplorer-category-filter", $"{currentLabel} ({currentCount})", ImGuiComboFlags.HeightLargest);
 
-        if (comboOpen)
+        using (combo)
         {
-            foreach (var (value, label) in options)
+            if (combo)
             {
-                var count = CountFor(value);
-                var isZero = count == 0;
-                var isSelected = value == _config.AlertCategory;
-
-                bool selected;
-                using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f), isZero))
-                    selected = ImGui.Selectable($"{label} ({count})", isSelected);
-                if (selected)
+                foreach (var (value, label) in options)
                 {
-                    _config.AlertCategory = value;
-                    _config.Save();
-                    _alertPoller.RequestPoll();
+                    var count = CountFor(value);
+                    var isZero = count == 0;
+                    var isSelected = value == _config.AlertCategory;
+
+                    bool selected;
+                    using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f), isZero))
+                        selected = ImGui.Selectable($"{label} ({count})", isSelected);
+                    if (selected)
+                    {
+                        _config.AlertCategory = value;
+                        _config.Save();
+                        _alertPoller.RequestPoll();
+                    }
+
+                    if (isSelected)
+                        ImGui.SetItemDefaultFocus();
                 }
-
-                if (isSelected)
-                    ImGui.SetItemDefaultFocus();
             }
-
-            ImGui.EndCombo();
         }
     }
 

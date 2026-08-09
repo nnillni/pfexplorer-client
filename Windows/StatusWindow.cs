@@ -104,28 +104,27 @@ public class StatusWindow : Window, IDisposable
         var partyFinderTabFlags = ForceFirstTabOnNextDraw ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
         ForceFirstTabOnNextDraw = false;
 
-        if (!ImGui.BeginTabBar("##pfexplorer-tabs"))
+        using var tabBar = ImRaii.TabBar("##pfexplorer-tabs");
+        if (!tabBar)
             return;
 
-        if (ImGui.BeginTabItem("Party Finder", partyFinderTabFlags))
+        using (var partyFinderTab = ImRaii.TabItem("Party Finder", partyFinderTabFlags))
         {
-            DrawPartyFinderTab();
-            ImGui.EndTabItem();
+            if (partyFinderTab)
+                DrawPartyFinderTab();
         }
 
-        if (ImGui.BeginTabItem("Upload"))
+        using (var uploadTab = ImRaii.TabItem("Upload"))
         {
-            DrawUploadTab();
-            ImGui.EndTabItem();
+            if (uploadTab)
+                DrawUploadTab();
         }
 
-        if (ImGui.BeginTabItem("Debug"))
+        using (var debugTab = ImRaii.TabItem("Debug"))
         {
-            DrawDebugTab();
-            ImGui.EndTabItem();
+            if (debugTab)
+                DrawDebugTab();
         }
-
-        ImGui.EndTabBar();
     }
 
     // Polls the server's search endpoint and lists/announces matches —
@@ -409,7 +408,8 @@ public class StatusWindow : Window, IDisposable
         ImGui.ColorButton("##current", currentColor, ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoInputs, new Vector2(20, 20));
         ImGui.SameLine();
 
-        if (ImGui.BeginCombo("Color", $"Row {current}"))
+        using var combo = ImRaii.Combo("Color", $"Row {current}");
+        if (combo)
         {
             foreach (var (rowId, color) in GetUiColorSwatches())
             {
@@ -422,7 +422,6 @@ public class StatusWindow : Window, IDisposable
                     _config.Save();
                 }
             }
-            ImGui.EndCombo();
         }
     }
 
@@ -502,42 +501,46 @@ public class StatusWindow : Window, IDisposable
         // e.g. "Green" shows green whether the dropdown is open or closed,
         // not just while picking. "Any" has no single status to match, so
         // it stays the default text color.
+        // Scoped tightly around just the combo's own Begin call — it colors
+        // the closed preview, not the dropdown body once it's open, so it
+        // can't stay pushed for the ImRaii.Combo's whole using scope below.
         Vector4? previewColor = _config.AlertFreshness >= 0 ? MatchFreshness.Colors[_config.AlertFreshness] : null;
-        bool comboOpen;
+        ImRaii.ComboDisposable combo;
         using (ImRaii.PushColor(ImGuiCol.Text, previewColor))
-            comboOpen = ImGui.BeginCombo("##freshness-filter", currentLabel);
+            combo = ImRaii.Combo("##freshness-filter", currentLabel);
 
-        if (comboOpen)
+        using (combo)
         {
-            var isAnySelected = _config.AlertFreshness < 0;
-            if (ImGui.Selectable("Any", isAnySelected))
+            if (combo)
             {
-                _config.AlertFreshness = -1;
-                _config.Save();
-                _alertPoller.RequestPoll();
-            }
-
-            if (isAnySelected)
-                ImGui.SetItemDefaultFocus();
-
-            for (var rank = 0; rank < MatchFreshness.Labels.Length; rank++)
-            {
-                var isSelected = _config.AlertFreshness == rank;
-                bool selected;
-                using (ImRaii.PushColor(ImGuiCol.Text, MatchFreshness.Colors[rank]))
-                    selected = ImGui.Selectable(MatchFreshness.Labels[rank], isSelected);
-                if (selected)
+                var isAnySelected = _config.AlertFreshness < 0;
+                if (ImGui.Selectable("Any", isAnySelected))
                 {
-                    _config.AlertFreshness = rank;
+                    _config.AlertFreshness = -1;
                     _config.Save();
                     _alertPoller.RequestPoll();
                 }
 
-                if (isSelected)
+                if (isAnySelected)
                     ImGui.SetItemDefaultFocus();
-            }
 
-            ImGui.EndCombo();
+                for (var rank = 0; rank < MatchFreshness.Labels.Length; rank++)
+                {
+                    var isSelected = _config.AlertFreshness == rank;
+                    bool selected;
+                    using (ImRaii.PushColor(ImGuiCol.Text, MatchFreshness.Colors[rank]))
+                        selected = ImGui.Selectable(MatchFreshness.Labels[rank], isSelected);
+                    if (selected)
+                    {
+                        _config.AlertFreshness = rank;
+                        _config.Save();
+                        _alertPoller.RequestPoll();
+                    }
+
+                    if (isSelected)
+                        ImGui.SetItemDefaultFocus();
+                }
+            }
         }
     }
 
