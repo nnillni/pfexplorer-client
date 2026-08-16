@@ -85,21 +85,33 @@ public sealed class AlertPoller : IDisposable
     // list's transient "new" highlight).
     private readonly HashSet<string> _announcedMatchIds = new();
 
-    // ListingId -> when this suppression expires. Populated by PruneMissing
-    // when PfScanTracker confirms (from your own organic PF browsing) that
-    // a complete, unfilled category page no longer contains a listing —
-    // without this, the very next poll (its own ~30s timer, independent of
-    // that) would just silently bring it right back, since the server's own
-    // "active" definition lags well behind what the game itself just told
-    // us: a row only drops out of activeOnly results once its updated_at
-    // ages past LISTING_FRESHNESS_MINUTES (5min by default), and a listing
-    // double-sourced via xivpfSync.ts's independent re-scrape sits under a
+    // ListingId -> (when this suppression expires, which bucket/DC it was
+    // removed from). Populated by PruneMissing when PfScanTracker confirms
+    // (from your own organic PF browsing) that a complete, unfilled category
+    // page no longer contains a listing — without this, the very next poll
+    // (its own ~30s timer, independent of that) would just silently bring it
+    // right back, since the server's own "active" definition lags well
+    // behind what the game itself just told us: a row only drops out of
+    // activeOnly results once its updated_at ages past
+    // LISTING_FRESHNESS_MINUTES (5min by default), and a listing double-
+    // sourced via xivpfSync.ts's independent re-scrape sits under a
     // completely separate DB row that can stay "active" even longer if
     // xivpf.com's own data hasn't caught up yet. Cleared the moment a scan
     // sees the listing again (see RefreshFromScan), so a false prune
     // self-heals within one scan cycle instead of being stuck hidden for
     // the full grace window below.
-    private readonly Dictionary<string, DateTime> _locallyRemovedListingIds = new();
+    //
+    // Bucket/DataCenter (rather than just the timestamp) exist so
+    // PruneMissing can reconfirm an entry here against a LATER scan of the
+    // same category — a single ExpireAsync report can fail to actually take
+    // server-side (dropped mid-flight, or the two-rows-per-real-listing
+    // situation above, where a report against one row doesn't necessarily
+    // clear the other) — so every time a fresh scan of the same bucket/DC
+    // still doesn't see it either, PruneMissing resends the report and
+    // refreshes this entry's expiry, instead of firing exactly once and
+    // hoping.
+    private readonly record struct LocalRemoval(DateTime ExpiresAt, string Bucket, string DataCenter);
+    private readonly Dictionary<string, LocalRemoval> _locallyRemovedListingIds = new();
     private static readonly TimeSpan LocalRemovalGrace = TimeSpan.FromMinutes(10);
 
     // listing id -> slotsFilled as of the last poll, for detecting a party
@@ -294,7 +306,7 @@ public sealed class AlertPoller : IDisposable
             {
                 var now = DateTime.UtcNow;
                 foreach (var expiredId in _locallyRemovedListingIds
-                             .Where(kv => kv.Value <= now)
+                             .Where(kv => kv.Value.ExpiresAt <= now)
                              .Select(kv => kv.Key)
                              .ToList())
                     _locallyRemovedListingIds.Remove(expiredId);
@@ -508,10 +520,22 @@ public sealed class AlertPoller : IDisposable
     // they were as of the last ~30s poll. Mutates the matched
     // PfListingSearchResult objects in place (they're reference types with
     // public setters, already sitting in Matches) rather than rebuilding
-    // the list, so this doesn't disturb NewMatchIds/_previousMatchingIds
-    // bookkeeping at all. Scoped to `dataCenter` for the same reason as
-    // PruneMissing below — organic browsing can only ever see the player's
-    // own DC.
+    // the list. Scoped to `dataCenter` for the same reason as PruneMissing
+    // below — organic browsing can only ever see the player's own DC.
+    //
+    // Also adds any listing this scan saw that ISN'T already tracked but
+    // passes the configured job/ilvl/DC filters (Matches_) — otherwise a
+    // genuinely new listing you just spotted in-game wouldn't show up here
+    // at all until the next ~30s PollAsync round-trip rebuilds Matches from
+    // the server, even though this client just proved it exists right now.
+    // This DOES touch NewMatchIds/_previousMatchingIds/_previousSlotsFilled/
+    // _announcedMatchIds bookkeeping (unlike the in-place refresh above) —
+    // gated on _previousMatchingIds already being non-null (i.e. the first
+    // real poll has completed) for the same reason PollAsync itself
+    // withholds "new match" announcements until then: before that baseline
+    // exists there's nothing sensible to compare "new" against, and this
+    // method's own bookkeeping updates below assume that baseline is
+    // already in a normal steady state.
     public int RefreshFromScan(IReadOnlyList<PfListingDto> freshListings, string dataCenter)
     {
         if (freshListings.Count == 0)
@@ -530,6 +554,8 @@ public sealed class AlertPoller : IDisposable
         var freshByListingId = freshListings
             .GroupBy(l => l.ListingId)
             .ToDictionary(g => g.Key, g => g.Last());
+
+        var existingIds = Matches.Select(m => m.ListingId).ToHashSet();
 
         var updated = 0;
         foreach (var match in Matches)
@@ -553,8 +579,87 @@ public sealed class AlertPoller : IDisposable
             updated++;
         }
 
+        if (_previousMatchingIds != null)
+        {
+            // From freshByListingId (already deduplicated by ListingId),
+            // not freshListings directly — the same real-world listing
+            // appearing twice in one batch would otherwise add two separate
+            // Matches entries for it and throw below (_previousSlotsFilled
+            // indexer would be fine, but this used to be .Add, which isn't
+            // — kept as an indexer now specifically so a future duplicate
+            // slipping through some other path fails safe instead of
+            // throwing).
+            var newlyMatching = freshByListingId.Values
+                .Where(l => string.Equals(l.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase))
+                .Where(l => !existingIds.Contains(l.ListingId))
+                .Select(ToSearchResult)
+                .Where(Matches_)
+                .ToList();
+
+            if (newlyMatching.Count > 0)
+            {
+                Matches = Matches.Concat(newlyMatching).ToList();
+                foreach (var listing in newlyMatching)
+                {
+                    _previousMatchingIds.Add(listing.ListingId);
+                    if (_previousSlotsFilled != null)
+                        _previousSlotsFilled[listing.ListingId] = listing.SlotsFilled;
+                }
+
+                NewMatchIds = NewMatchIds.Concat(newlyMatching.Select(l => l.ListingId)).ToHashSet();
+
+                // Same eligibility/cap/gating PollAsync's own new-match
+                // announcement uses (see its own comment) — _announcedMatchIds
+                // marked regardless of whether AlertNotifyOnNewMatch is on,
+                // same as PollAsync's own unconditional seed loop, so a
+                // listing captured here while notifications happened to be
+                // off doesn't announce retroactively the moment they're
+                // turned back on.
+                if (_config.AlertNotifyOnNewMatch)
+                {
+                    foreach (var listing in newlyMatching
+                                 .Where(l => !_announcedMatchIds.Contains(l.ListingId))
+                                 .Where(PassesDisplayFilters)
+                                 .Take(MaxAnnouncementsPerPoll))
+                        AnnounceNewMatch(listing);
+                }
+
+                foreach (var listing in newlyMatching)
+                    _announcedMatchIds.Add(listing.ListingId);
+            }
+        }
+
         return updated;
     }
+
+    // PfListingDto (the shape ReceiveListing events map to) -> the subset
+    // of PfListingSearchResult fields (the shape server search results —
+    // and Matches — use) a locally-captured listing can actually supply.
+    // Id is the SERVER's numeric row id, which a listing captured straight
+    // from the game doesn't have yet — only ListingId (the game's own,
+    // used for everything that actually matters: matching, pruning,
+    // OpenListing) is real here. A hash keeps MatchListView's per-row ImGui
+    // widget ids (the only thing Id is actually used for) collision-free
+    // without needing a real one.
+    private static PfListingSearchResult ToSearchResult(PfListingDto dto) => new()
+    {
+        Id = dto.ListingId.GetHashCode(),
+        ListingId = dto.ListingId,
+        Name = dto.Name,
+        Description = dto.Description,
+        World = dto.World,
+        DataCenter = dto.DataCenter,
+        DutyName = dto.DutyName,
+        Category = dto.Category,
+        DutyType = dto.DutyType,
+        MinItemLevel = dto.MinItemLevel,
+        CapturedAt = dto.CapturedAt,
+        SlotsAvailable = dto.SlotsAvailable,
+        SlotsFilled = dto.SlotsFilled,
+        JobsPresent = dto.JobsPresent,
+        Tags = dto.Tags,
+        OpenSlotJobs = dto.OpenSlotJobs,
+    };
 
     // Called by PfScanTracker right after a batch of ReceiveListing events
     // from your own organic browsing (opening PF, switching a category tab,
@@ -598,6 +703,66 @@ public sealed class AlertPoller : IDisposable
                 && !seenListingIds.Contains(l.ListingId))
             .ToList();
 
+        // Missing from a complete, unfilled category page — corroborated,
+        // high-confidence evidence, so this is allowed to also block the
+        // next poll from silently bringing it right back (see
+        // _locallyRemovedListingIds's own doc comment).
+        var removed = RemoveStale(stale, suppressFromPolls: true).ToList();
+
+        // Reconfirmation: a listing an EARLIER call to this method already
+        // removed (and reported) for this same bucket/DC, still within its
+        // grace window, that THIS fresh unfilled page also doesn't contain —
+        // resend the expire report and refresh its grace, on the same
+        // reasoning as _locallyRemovedListingIds's own doc comment on why
+        // one report isn't always enough to actually get the server to mark
+        // it gone. Every caller of PruneMissing already sends whatever this
+        // returns to ExpireAsync, so folding these into the same return
+        // value is all that's needed to get them resent — no separate call
+        // site.
+        var now = DateTime.UtcNow;
+        var reconfirmed = _locallyRemovedListingIds
+            .Where(kv => kv.Value.ExpiresAt > now
+                && buckets.Contains(kv.Value.Bucket)
+                && string.Equals(kv.Value.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase)
+                && !seenListingIds.Contains(kv.Key))
+            .Select(kv => kv.Key)
+            .ToList();
+
+        if (reconfirmed.Count > 0)
+        {
+            var expiresAt = now + LocalRemovalGrace;
+            foreach (var listingId in reconfirmed)
+            {
+                var existing = _locallyRemovedListingIds[listingId];
+                _locallyRemovedListingIds[listingId] = existing with { ExpiresAt = expiresAt };
+            }
+
+            removed.AddRange(reconfirmed);
+        }
+
+        return removed;
+    }
+
+    // Same removal as PruneMissing, for a single listing flagged by some
+    // OTHER, weaker signal — currently just PfListingOpener, when a
+    // listing's detail popup doesn't appear shortly after being clicked
+    // (see its own doc comment). That's suggestive, not confirmed: it could
+    // just as easily be lag as the listing actually being gone, unlike
+    // PruneMissing's "absent from an entire unfilled category page." So
+    // this fixes the results list instantly (the whole point — don't leave
+    // a dead-looking entry sitting there) but deliberately does NOT set
+    // suppressFromPolls — a false positive here should self-heal on the
+    // very next poll instead of blocking the server's own (correct) data
+    // for the full 10-minute grace window, which is what a bad detail-open
+    // read used to do.
+    public IReadOnlyList<string> RemoveListingLocally(string listingId)
+    {
+        var stale = Matches.Where(l => l.ListingId == listingId).ToList();
+        return RemoveStale(stale, suppressFromPolls: false);
+    }
+
+    private IReadOnlyList<string> RemoveStale(List<PfListingSearchResult> stale, bool suppressFromPolls)
+    {
         if (stale.Count == 0)
             return Array.Empty<string>();
 
@@ -613,13 +778,16 @@ public sealed class AlertPoller : IDisposable
             _missingPollStreak.Remove(id);
 
         // Also block this exact listing from being resurrected by the next
-        // poll (see _locallyRemovedListingIds's doc comment) — the game
-        // confirmed it's gone, so the server catching up later doesn't get
-        // to overrule that until either the grace window elapses or a scan
-        // sees it again.
-        var expiresAt = DateTime.UtcNow + LocalRemovalGrace;
-        foreach (var listingId in staleSet)
-            _locallyRemovedListingIds[listingId] = expiresAt;
+        // poll (see _locallyRemovedListingIds's doc comment) — only for the
+        // high-confidence caller (PruneMissing); see RemoveListingLocally's
+        // own doc comment for why the weaker-signal caller skips this.
+        if (suppressFromPolls)
+        {
+            var expiresAt = DateTime.UtcNow + LocalRemovalGrace;
+            foreach (var listing in stale)
+                _locallyRemovedListingIds[listing.ListingId] =
+                    new LocalRemoval(expiresAt, MatchCategorizer.NativeBucket(listing), listing.DataCenter);
+        }
 
         // Instant version of PollAsync's own removed-announcement — this
         // is the higher-confidence path (ground truth from the game

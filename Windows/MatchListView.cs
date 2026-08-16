@@ -429,17 +429,33 @@ public class MatchListView : IDisposable
         // before and turned out fragile against this table's per-row
         // variable height; per-column groups get the same "click anywhere
         // you're reading" result without that risk.
-        void HandleColumnClick()
+        // suppressTooltip: the duty column also contains DrawSlots' own
+        // per-job-square tooltips (Dummy widgets nested inside this same
+        // Group) — IsItemHovered() after EndGroup() is true for the whole
+        // column whenever the mouse is anywhere inside it, including right
+        // over one of those squares, so this would otherwise call
+        // SetTooltip again and stomp the job tooltip DrawSlotSquare just
+        // set (only the last SetTooltip call in a frame actually shows).
+        void HandleColumnClick(bool suppressTooltip = false)
         {
             if (!ImGui.IsItemHovered())
                 return;
 
-            // No more one-click travel (see PfListingOpener.Open) — the
-            // tooltip is purely informational now, same two messages the
-            // travel icon column shows below.
-            ImGui.SetTooltip(needsTravel
-                ? (canTravel ? $"Needs to travel to {listing.DataCenter}" : $"Cannot travel to {listing.DataCenter}")
-                : "Click twice to view");
+            if (!suppressTooltip)
+            {
+                // Same idea as the minimal view's tooltip — when the
+                // description isn't shown inline (AlertHideDescription),
+                // hovering is the only way to read it, so show it here
+                // instead of "Click to view/travel". Still shown inline as
+                // usual when AlertHideDescription is off, so no tooltip
+                // duplication there.
+                string tooltip;
+                if (_config.AlertHideDescription && !string.IsNullOrEmpty(listing.Description))
+                    tooltip = WrapText(listing.Description, 80);
+                else
+                    tooltip = needsTravel ? "Click to travel" : "Click to view";
+                ImGui.SetTooltip(tooltip);
+            }
             if (ImGui.IsItemClicked())
                 PfListingOpener.Open(listing);
         }
@@ -468,6 +484,7 @@ public class MatchListView : IDisposable
         HandleColumnClick();
 
         ImGui.TableNextColumn();
+        bool jobTooltipShown;
         using (ImRaii.Group())
         {
             using (ImRaii.PushColor(ImGuiCol.Text, GoldColor, isNew))
@@ -481,7 +498,7 @@ public class MatchListView : IDisposable
             if (!_config.AlertHideDescription && !string.IsNullOrEmpty(listing.Description))
                 ImGui.TextWrapped(listing.Description);
 
-            DrawSlots(listing);
+            jobTooltipShown = DrawSlots(listing);
 
             var firstTag = true;
             foreach (var tag in listing.Tags)
@@ -497,7 +514,7 @@ public class MatchListView : IDisposable
                     ImGui.TextUnformatted($"[{meta.Label}]");
             }
         }
-        HandleColumnClick();
+        HandleColumnClick(suppressTooltip: jobTooltipShown);
 
         ImGui.TableNextColumn();
         using (ImRaii.Group())
@@ -509,21 +526,46 @@ public class MatchListView : IDisposable
         HandleColumnClick();
 
         ImGui.TableNextColumn();
-        using (ImRaii.Group())
+        if (needsTravel)
         {
-            if (needsTravel)
+            // Icon-only instead of a "Travel" text label — the column was
+            // mostly empty space around that one word; the tooltip covers
+            // what it does without needing to spell it out. Self-contained
+            // hover/click (not HandleColumnClick) since a real button
+            // already gets its own IsItemHovered/IsItemClicked, and its
+            // disabled reasons (not in the open world, unrecognized DC,
+            // wrong region) are more specific than the other columns' plain
+            // "Click to travel".
+            var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
+            bool clicked;
+            using (ImRaii.Disabled(!canTravel))
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
+                clicked = ImGui.SmallButton($"{FontAwesomeIcon.PlaneDeparture.ToIconString()}##travel-{listing.Id}");
+            // BeginDisabled makes IsItemHovered() return false by default —
+            // AllowWhenDisabled is needed to still get the tooltip telling
+            // you *why* it's disabled, which is the whole point here.
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             {
-                // Plain icon, not a button — same "you'll need to travel
-                // for this one" flag the minimal view uses, not a second
-                // click target that could fire travel on its own (see
-                // PfListingOpener.Open's own doc comment on why one-click
-                // travel was removed).
-                using (ImRaii.PushColor(ImGuiCol.Text, canTravel ? Vector4.One : new Vector4(0.5f, 0.5f, 0.5f, 1f)))
-                using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.FontIcon))
-                    ImGui.TextUnformatted(FontAwesomeIcon.PlaneDeparture.ToIconString());
+                string tooltip;
+                if (canTravel)
+                    tooltip = $"Travel to {listing.DataCenter}";
+                else if (!PfListingOpener.IsInOpenWorld)
+                    tooltip = "Can't travel right now — only available out in the open world";
+                else if (targetRegion == null)
+                    // A data center we don't recognize at all (not in
+                    // DataCenterRegions.All) — no region to explain, so
+                    // don't guess at one.
+                    tooltip = "Cannot travel here";
+                else
+                    tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion}), and only Oceania allows cross-region travel";
+                ImGui.SetTooltip(tooltip);
             }
+            // Same confirmation popup PfListingOpener.Open uses for a
+            // clicked result in a different DC — one travel flow, not two
+            // that behave differently depending which button you clicked.
+            if (clicked && canTravel)
+                PfListingOpener.RequestTravel(listing.DataCenter, listing.World);
         }
-        HandleColumnClick();
     }
 
     // "30s", "5m", "1h20m" — same compact style as the website's freshness
@@ -539,6 +581,36 @@ public class MatchListView : IDisposable
         if (elapsed.TotalMinutes >= 1)
             return $"{(int)elapsed.TotalMinutes}m";
         return $"{(int)elapsed.TotalSeconds}s";
+    }
+
+    // Greedy word-wrap at `maxLineLength` — never splits a word, so a
+    // single word longer than the limit just gets its own overlong line
+    // rather than being cut mid-word. Used for the minimal view's
+    // description tooltip, which (unlike the full table's TextWrapped)
+    // isn't laid out inside an ImGui column that can wrap for it on its
+    // own.
+    private static string WrapText(string text, int maxLineLength)
+    {
+        var words = text.Split(' ');
+        var lines = new List<string>();
+        var current = "";
+        foreach (var word in words)
+        {
+            if (current.Length == 0)
+                current = word;
+            else if (current.Length + 1 + word.Length <= maxLineLength)
+                current += " " + word;
+            else
+            {
+                lines.Add(current);
+                current = word;
+            }
+        }
+
+        if (current.Length > 0)
+            lines.Add(current);
+
+        return string.Join("\n", lines);
     }
 
     // Cached so retyping/backspacing doesn't recompile the same pattern
@@ -675,9 +747,14 @@ public class MatchListView : IDisposable
         }
     }
 
-    private void DrawSlots(PfListingSearchResult listing)
+    // Returns whether a job square's own tooltip was shown this frame — the
+    // caller (DrawMatchRow) needs that so its outer column-wide tooltip
+    // doesn't immediately stomp it (see HandleColumnClick's own doc comment
+    // on why).
+    private bool DrawSlots(PfListingSearchResult listing)
     {
         var firstItem = true;
+        var tooltipShown = false;
 
         void NextItem()
         {
@@ -690,7 +767,7 @@ public class MatchListView : IDisposable
         {
             NextItem();
             var color = JobRoleColor.TryGetValue(job, out var c) ? c : DpsColor;
-            DrawSlotSquare(color, 1f, job);
+            tooltipShown |= DrawSlotSquare(color, 1f, job);
         }
 
         // Same trim as the website's getOpenSlotJobLists: cap to the real
@@ -724,7 +801,7 @@ public class MatchListView : IDisposable
             // color, so filled vs. open reads at a glance without losing
             // which role is needed. Dimmed further (0.5) so it reads even
             // less "filled" than the website's own version.
-            DrawSlotSquare(color, 0.5f, tooltip);
+            tooltipShown |= DrawSlotSquare(color, 0.5f, tooltip);
         }
 
         var unaccounted = openCount - shownOpen.Count;
@@ -733,17 +810,22 @@ public class MatchListView : IDisposable
             NextItem();
             ImGui.TextDisabled($"+{unaccounted} open");
         }
+
+        return tooltipShown;
     }
 
-    private static void DrawSlotSquare(Vector4 color, float alpha, string tooltip)
+    private static bool DrawSlotSquare(Vector4 color, float alpha, string tooltip)
     {
         var drawColor = new Vector4(color.X, color.Y, color.Z, color.W * alpha);
         var size = ImGuiHelpers.ScaledVector2(14, 14);
         var pos = ImGui.GetCursorScreenPos();
         ImGui.GetWindowDrawList().AddRectFilled(pos, pos + size, ImGui.GetColorU32(drawColor), 2f * ImGuiHelpers.GlobalScale);
         ImGui.Dummy(size);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(tooltip);
+        if (!ImGui.IsItemHovered())
+            return false;
+
+        ImGui.SetTooltip(tooltip);
+        return true;
     }
 
     // Shared between the normal table row and the minimal-mode row — a Blue
@@ -826,13 +908,12 @@ public class MatchListView : IDisposable
         var dutyName = string.IsNullOrEmpty(listing.DutyName) ? listing.Category : listing.DutyName;
 
         // Same "do I need to travel, and can I" logic as the full table's
-        // travel icon column — used below for an icon rather than a
-        // separate clickable button, since the whole row already triggers
-        // PfListingOpener.Open (which itself toasts an error for a
-        // different-DC listing now instead of prompting to travel — see
-        // PfListingOpener.Open's own doc comment) regardless of where on
-        // the row you click. Computed up front so the freshness tint below
-        // can also be dimmed by it.
+        // dedicated Travel button/column — used below for an icon rather
+        // than a separate clickable button, since the whole row already
+        // triggers PfListingOpener.Open (which itself prompts/errors on
+        // travel as needed — see PfListingOpener.Open) regardless of where
+        // on the row you click. Computed up front so the freshness tint
+        // below can also be dimmed by it.
         var alreadyThere = _localDataCenter != null
             && string.Equals(_localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase);
         var localRegion = DataCenterRegions.RegionOf(_localDataCenter);
@@ -863,9 +944,25 @@ public class MatchListView : IDisposable
         var rowClicked = ImGui.Selectable($"##row-{listing.Id}", false, ImGuiSelectableFlags.None, new Vector2(rowWidth, rowHeight));
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip(needsTravel
-                ? (canTravel ? $"Needs to travel to {listing.DataCenter}" : $"Cannot travel to {listing.DataCenter}")
-                : "Click twice to view");
+            // The listing's own description, not "Click to view/travel" —
+            // minimal mode has no room for a description line the way the
+            // full table does, so the hover is the only place to read it.
+            // Falls back to the old click/travel guidance when there's no
+            // description to show instead of an empty tooltip.
+            string tooltip;
+            if (!string.IsNullOrEmpty(listing.Description))
+            {
+                tooltip = WrapText(listing.Description, 80);
+            }
+            else if (!needsTravel)
+                tooltip = "Click to view";
+            else if (canTravel)
+                tooltip = "Click to travel";
+            else if (!PfListingOpener.IsInOpenWorld)
+                tooltip = "Can't travel right now — only available out in the open world";
+            else
+                tooltip = $"Can't travel to {listing.DataCenter} — different region ({targetRegion ?? "unknown"}), and only Oceania allows cross-region travel";
+            ImGui.SetTooltip(tooltip);
         }
         ImGui.SetCursorScreenPos(rowStart);
 

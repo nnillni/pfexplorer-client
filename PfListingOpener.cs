@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.System.Framework;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -9,28 +12,23 @@ using PfExplorer.Windows;
 
 namespace PfExplorer;
 
-// Opens a specific PF listing in-game when a result is clicked — one click,
-// one native call, never more (see Open's own doc comment for the exact
-// priority order). AgentLookingForGroup.OpenListing(id) alone only shows
-// something if the local client already has that listing's raw data cached,
-// which is only true for listings your own client has actually requested —
-// most results here came from someone else's plugin/xivpf, so a single
-// click often can't reach a join popup in one step. Rather than chaining
-// Show + RequestCategoryListings + OpenListing together behind one click
-// (crosses from "UI convenience" into automating what should be several
-// separate manual actions), each click does exactly the next thing that's
-// missing, in priority order — repeated/idle clicks naturally walk the rest
-// of the way there, and past that point get spent sweeping other
-// categories' listings into the capture/upload pipeline instead of doing
-// nothing.
+// Opens a specific PF listing in-game when a result is clicked. Doing this
+// right takes more than just AgentLookingForGroup.OpenListing(id): that call
+// only shows something if the local client already has that listing's raw
+// data cached, which is only true for listings your own client has actually
+// requested — most results here came from someone else's plugin/xivpf, so
+// without a fresh RequestCategoryListings first, OpenListing would silently
+// show nothing. Firing that request also happens to feed our own capture/
+// upload pipeline, so a click here doubles as "go look at this" and "go
+// capture this category" at the same time.
 public static class PfListingOpener
 {
     // Party Finder itself is unreachable while logged out, inside a duty
     // instance, or between zones/cutscenes — RequestCategoryListings still
     // "succeeds" in those states, it just never yields ReceiveListing
-    // calls. Shared by Open (below) and MatchListView's own travel-icon
-    // gating — one definition of "actually in the open world right now"
-    // instead of two that could silently drift apart.
+    // calls. Shared by Open/RequestTravel (below) and MatchListView's own
+    // travel-button gating — one definition of "actually in the open world
+    // right now" instead of two that could silently drift apart.
     public static bool IsInOpenWorld =>
         Plugin.ClientState.IsLoggedIn
         && !Plugin.Condition[ConditionFlag.BoundByDuty]
@@ -71,15 +69,79 @@ public static class PfListingOpener
     public static byte? CategoryByteFor(string rawCategory) =>
         RawCategoryToRequestByte.TryGetValue(rawCategory, out var value) ? value : null;
 
-    // For Open's tab-rotation fallback (see its own doc comment) — not
-    // seeded/deterministic on purpose, this only ever needs to pick
-    // "some other tab," never to be reproducible.
-    private static readonly Random TabRandom = new();
+    // Fired right after Open (below) fires a RequestCategoryListings for a
+    // clicked listing — wired up in Plugin's constructor to
+    // PfBackgroundScraper.RecordManualRequest, so a click-triggered request
+    // shows up in the Debug tab's scan log the same way a background scan
+    // cycle step does, instead of being invisible there. A plain static
+    // event rather than a direct PfBackgroundScraper reference — this class
+    // is fully static and has no instance of it to hold, same reasoning as
+    // every other cross-class hookup in Plugin's constructor.
+    public static event Action<byte, string>? OnCategoryRequested;
+
+    // Fired from CheckPendingDetailOpen (below) when a click's OpenListing
+    // never actually produced a detail popup — wired up in Plugin's
+    // constructor to AlertPoller.RemoveListingLocally, for the same reason
+    // OnCategoryRequested exists: this class is static and holds no
+    // AlertPoller reference of its own.
+    public static event Action<string>? OnListingOpenFailed;
+
+    // "/li" turned out to be bound to a travel plugin that executes a world
+    // visit immediately, with no confirmation of its own — not something
+    // to fire straight from a click, since it's a much bigger deal than
+    // opening a window. DrawTravelConfirmation (wired into Plugin's Draw
+    // hook) renders an actual Yes/No popup instead; this just records what
+    // it's asking about and that the popup needs to open.
+    private static (string DataCenter, string World)? _pendingTravel;
+    private static bool _travelPopupNeedsOpen;
+    private const string TravelPopupId = "Travel?##pf-travel-confirm";
+
+    // OpenListing has no return value — the only way to tell whether it
+    // actually produced a detail popup is to check back a moment later.
+    // Set at the end of Open (below) whenever it fires OpenListing for a
+    // category it just re-requested; CheckPendingDetailOpen (wired into
+    // Plugin's Draw hook, same as DrawTravelConfirmation) samples it once
+    // this elapses.
+    private static string? _pendingDetailListingId;
+    private static byte? _pendingDetailCategory;
+    private static string? _pendingDetailCategoryLabel;
+    private static DateTime? _pendingDetailCheckAt;
+    // 600ms turned out too tight — under any real latency (RequestCategoryListings
+    // itself is a round trip, and OpenListing presumably needs that data to
+    // have actually landed first) it read as "failed" for a listing that
+    // was really just slow, which used to be expensive: see
+    // AlertPoller.RemoveListingLocally's own doc comment on why a false
+    // positive here no longer costs a 10-minute poll suppression, but it's
+    // still better not to false-positive in the first place. Matched to
+    // PfBackgroundScraper.ResultSampleDelay, the same kind of "give the
+    // game a moment to actually respond" wait used elsewhere in this file.
+    private static readonly TimeSpan DetailCheckDelay = TimeSpan.FromSeconds(1.5);
+
+    // Shared by Open (below, for a same-region-different-DC listing) and
+    // MatchListView's dedicated Travel button — one confirmation flow
+    // instead of two, so both surfaces behave the same way instead of one
+    // asking and the other still firing instantly.
+    public static void RequestTravel(string dataCenter, string world)
+    {
+        // The World Visit System (and whatever "/li" is bound to) isn't
+        // usable mid-duty/zoning/cutscene any more than the PF window
+        // itself is — see IsInOpenWorld above. Checked here too, not just
+        // in Open below, since MatchListView's Travel button calls this
+        // directly without going through Open.
+        if (!IsInOpenWorld)
+        {
+            Plugin.ToastGui.ShowError("Can't travel right now — only available out in the open world.");
+            return;
+        }
+
+        _pendingTravel = (dataCenter, world);
+        _travelPopupNeedsOpen = true;
+    }
 
     public static unsafe void Open(PfListingSearchResult listing)
     {
-        // Opening the native PF window isn't meaningful mid-duty/zoning/
-        // cutscene either — see IsInOpenWorld's own doc comment.
+        // Same reasoning as RequestTravel above — opening the native PF
+        // window isn't meaningful mid-duty/zoning/cutscene either.
         if (!IsInOpenWorld)
         {
             Plugin.ToastGui.ShowError("Can't open Party Finder right now — only available out in the open world.");
@@ -95,22 +157,22 @@ public static class PfListingOpener
         var localDataCenter = MatchListView.GetLocalDataCenter();
         if (localDataCenter != null && !string.Equals(localDataCenter, listing.DataCenter, StringComparison.OrdinalIgnoreCase))
         {
-            // No more one-click auto-travel — it let a click silently fire a
-            // real world visit through whatever "/li"-bound plugin you had
-            // installed, with no confirmation of its own beyond the popup
-            // this used to show. Same region-gate as MatchListView's travel
-            // icon uses for its tooltip — the World Visit System only allows
-            // cross-DC travel within your own region (NA/EU/JP), except
-            // Oceania, which is exempt from that restriction in both
-            // directions — just to pick which toast to show, since neither
-            // case does anything but tell you why you can't see this party.
+            // Same region-gate as MatchListView's dedicated Travel button —
+            // the World Visit System only allows cross-DC travel within your
+            // own region (NA/EU/JP), except Oceania, which is exempt from
+            // that restriction in both directions.
             var localRegion = DataCenterRegions.RegionOf(localDataCenter);
             var targetRegion = DataCenterRegions.RegionOf(listing.DataCenter);
             var canTravel = targetRegion == "OCE" || (localRegion != null && localRegion == targetRegion);
 
-            Plugin.ToastGui.ShowError(canTravel
-                ? $"Needs to travel to {listing.DataCenter} to see this party — travel there yourself first."
-                : $"Cannot travel to {listing.DataCenter} to see this party — different region, and only Oceania allows cross-region travel.");
+            if (canTravel)
+            {
+                RequestTravel(listing.DataCenter, listing.World);
+            }
+            else
+            {
+                Plugin.ToastGui.ShowError($"Can't travel to {listing.DataCenter} to see this party — different region, and only Oceania allows cross-region travel.");
+            }
 
             return;
         }
@@ -119,89 +181,72 @@ public static class PfListingOpener
         if (agent == null)
             return;
 
-        // One click, one native call — checked fresh every click, in this
-        // priority order:
-        //   1. PF window not open yet? Open it. agent->Show() confirmed
-        //      live to close the detail popup instead of opening the list
-        //      window when called while the popup's already up (some
-        //      native toggle-like behavior in AgentLookingForGroup's own
-        //      Show(), not anything in our code) — ordering the window
-        //      before the popup means Show() only ever runs while the
-        //      popup definitely isn't open yet, so there's nothing for it
-        //      to close.
-        //   2. Window's open, but the join popup either isn't up yet or is
-        //      showing a *different* listing than the one just clicked?
-        //      Open this one. IsAddonVisible alone can't tell those two
-        //      cases apart (it only knows some detail popup is up, not
-        //      whose) — _lastOpenedListingId is what catches "you clicked
-        //      someone else's listing" so that doesn't get mistaken for
-        //      "already got what you asked for" and fall through to the
-        //      tab-rotation step below instead of actually opening it.
-        //   3. Both open AND it's already this exact listing showing?
-        //      Nothing left worth doing for THIS listing — rather than a
-        //      no-op click, sweep to a random other tab instead. Not
-        //      user-facing usefulness; purely opportunistic, so repeated/
-        //      idle clicking still ends up feeding more categories'
-        //      listings into the capture/upload pipeline instead of doing
-        //      nothing.
-        // IsVisible (AtkUnitBase, inherited by every addon struct), not
-        // just GetAddonByName returning non-null — that only means an
-        // addon is loaded in memory, not that it's actually on screen.
-        var lfgOpen = IsAddonVisible("LookingForGroup");
-        var detailOpen = IsAddonVisible("LookingForGroupDetail");
-        var isSameListing = listing.ListingId == _lastOpenedListingId;
-        _lastOpenedListingId = listing.ListingId;
-
-        if (!lfgOpen)
+        // Deliberately no agent->Show() here — that opens the full list
+        // window, which isn't what a listing click is for. RequestCategoryListings
+        // alone is enough to warm the agent's cache for this listing's
+        // category (background traffic only, same call the scraper fires,
+        // just for one specific category instead of a walk through all of
+        // them) so OpenListing below has real data to show, without ever
+        // making the list itself visible.
+        //
+        // Prefers the display bucket over the raw category — MatchCategorizer
+        // reclassifies specific fights (e.g. "The Unmaking (Extreme)") from
+        // their raw "Trials"/"Raids" category into "HighEndDuty", which IS a
+        // real PF tab; using the raw category here would silently request
+        // the wrong tab for those. Falls back to the raw category when the
+        // bucket isn't a real tab at all (e.g. "BlueMage", which is a
+        // display-only grouping over ordinary Dungeons/Trials/Raids content,
+        // not its own PF category).
+        var categoryLabel = CategoryByteFor(MatchCategorizer.CategoryBucket(listing)) != null
+            ? MatchCategorizer.CategoryBucket(listing)
+            : listing.Category;
+        var category = CategoryByteFor(categoryLabel);
+        if (category is { } value)
         {
-            agent->Show();
-            return;
+            agent->RequestCategoryListings(value);
+            // Lets this show up in the Debug tab's scan log alongside
+            // PfBackgroundScraper's own scheduled requests instead of being
+            // invisible there — see OnCategoryRequested's own doc comment.
+            OnCategoryRequested?.Invoke(value, categoryLabel);
         }
 
-        if (!detailOpen || !isSameListing)
+        // OpenListing is expected to pop just the detail popup on its own,
+        // without needing the list window open/visible first, as long as
+        // the agent already has this listing's data cached (which the
+        // RequestCategoryListings call above just ensured) — not yet
+        // live-confirmed with Show() removed, unlike most other native
+        // agent behavior in this file.
+        if (ulong.TryParse(listing.ListingId, out var listingId))
         {
-            if (ulong.TryParse(listing.ListingId, out var listingId))
-                agent->OpenListing(listingId);
-            return;
+            agent->OpenListing(listingId);
+
+            // Scheduled regardless of whether `category` resolved to a real
+            // tab above — CheckPendingDetailOpen still confirms/denies the
+            // popup either way; it just skips the background re-scan step
+            // if there's no category byte to request.
+            _pendingDetailListingId = listing.ListingId;
+            _pendingDetailCategory = category;
+            _pendingDetailCategoryLabel = categoryLabel;
+            _pendingDetailCheckAt = DateTime.UtcNow + DetailCheckDelay;
         }
 
-        // RequestCategoryListings alone refreshes the underlying list data
-        // but doesn't reliably move the addon's own visible tab highlight —
-        // pinning CategoryTab afterward is what actually makes the tab
-        // selection itself visibly change instead of just the results.
-        var tab = RandomOtherTab(agent->CategoryTab);
-        agent->RequestCategoryListings(tab);
-        agent->CategoryTab = tab;
-    }
-
-    // Tracks which listing the join popup (if any) actually belongs to —
-    // see Open's own doc comment on why IsAddonVisible alone can't
-    // distinguish "showing this listing" from "showing whatever was last
-    // opened."
-    private static string? _lastOpenedListingId;
-
-    // GetAddonByName only tells you an addon is loaded, not that it's
-    // actually being drawn — an addon can sit loaded-but-hidden (see Open's
-    // own comment on why this matters). IsVisible (AtkUnitBase, inherited
-    // by every addon struct) is the real check.
-    private static unsafe bool IsAddonVisible(string name)
-    {
-        var addonPtr = Plugin.GameGui.GetAddonByName(name, 1).Address;
-        return addonPtr != IntPtr.Zero && ((AtkUnitBase*)addonPtr)->IsVisible;
-    }
-
-    // Picks a real PF tab (1-16, see RawCategoryToRequestByte) other than
-    // `current` — excluding it guarantees Open's tab-rotation fallback
-    // (above) actually moves somewhere new on every one of these clicks
-    // instead of occasionally re-picking the tab already showing by chance.
-    private static byte RandomOtherTab(byte current)
-    {
-        byte next;
-        do
-        {
-            next = (byte)TabRandom.Next(1, 17);
-        } while (next == current);
-        return next;
+        // Not just a visible-tab cosmetic (there's no list window open to
+        // show it in anymore) — PfScanTracker.Tick() reads CategoryTab as
+        // its own ground truth for "which category did the request that
+        // just settled actually target," to decide which of Matches a
+        // resulting unfilled page is allowed to prune. OpenListing appears
+        // to overwrite CategoryTab from the listing's own data once it
+        // resolves, which raced against RequestCategoryListings setting it
+        // above — pinning it here, last, is what keeps it actually matching
+        // the category this click just requested. Leaving this out (as a
+        // previous version of this method did) meant a click's response
+        // got attributed to whatever category CategoryTab last happened to
+        // hold — often a stale, unrelated one — and PfScanTracker would
+        // then prune that WRONG category's listings as "missing," which is
+        // exactly the "results disappearing when another request happens"
+        // bug this fixes.
+        if (category is { } tab)
+            agent->CategoryTab = tab;
     }
 
     // Unlike LookingForGroup, there's no dedicated AgentLookingForGroup-style
@@ -219,5 +264,121 @@ public static class PfListingOpener
         var agent = Framework.Instance()->GetUIModule()->GetAgentModule()->GetAgentByInternalId(AgentId.AozNotebook);
         if (agent != null)
             agent->Show();
+    }
+
+    // GetAddonByName only tells you an addon is loaded, not that it's
+    // actually being drawn — an addon can sit loaded-but-hidden. IsVisible
+    // (AtkUnitBase, inherited by every addon struct) is the real check.
+    private static unsafe bool IsAddonVisible(string name)
+    {
+        var addonPtr = Plugin.GameGui.GetAddonByName(name, 1).Address;
+        return addonPtr != IntPtr.Zero && ((AtkUnitBase*)addonPtr)->IsVisible;
+    }
+
+    // Wired into Plugin's Draw hook alongside DrawTravelConfirmation —
+    // samples whether Open's own OpenListing call (DetailCheckDelay ago)
+    // actually produced a detail popup. A miss here almost always means the
+    // listing is already gone — someone else joined/closed it, or it aged
+    // out, between whenever the alert list last saw it and this click — so
+    // this both fixes the results list immediately (RemoveListingLocally,
+    // via OnListingOpenFailed) instead of leaving a dead entry sitting
+    // there until the next poll, and fires a background re-request for the
+    // category so PfBackgroundScraper's own scan/prune independently
+    // confirms it, same as any other capture.
+    public static unsafe void CheckPendingDetailOpen()
+    {
+        if (_pendingDetailCheckAt is not { } checkAt || DateTime.UtcNow < checkAt)
+            return;
+
+        var listingId = _pendingDetailListingId;
+        var category = _pendingDetailCategory;
+        var categoryLabel = _pendingDetailCategoryLabel;
+        _pendingDetailCheckAt = null;
+        _pendingDetailListingId = null;
+        _pendingDetailCategory = null;
+        _pendingDetailCategoryLabel = null;
+
+        if (IsAddonVisible("LookingForGroupDetail"))
+            return;
+
+        if (listingId != null)
+            OnListingOpenFailed?.Invoke(listingId);
+
+        if (category is not { } value || categoryLabel == null)
+            return;
+
+        var agent = AgentLookingForGroup.Instance();
+        if (agent == null)
+            return;
+
+        agent->RequestCategoryListings(value);
+        OnCategoryRequested?.Invoke(value, categoryLabel);
+    }
+
+    // Wired into Plugin's Draw hook, runs every frame regardless of
+    // _pendingTravel's state — ImGui.OpenPopup has to be called from inside
+    // an active frame, which a chat link's click callback isn't guaranteed
+    // to be, so this is the one place that's actually safe to call it from
+    // (once, on the frame right after Open sets a pending request).
+    public static void DrawTravelConfirmation()
+    {
+        if (_travelPopupNeedsOpen)
+        {
+            // Captured here rather than at the actual click (RequestTravel/
+            // Open) — this runs on the very next Draw after that click, in
+            // the same frame in the row-click case, so the mouse hasn't
+            // meaningfully moved, and this is guaranteed to run inside an
+            // active ImGui frame (see this method's own doc comment) where
+            // a chat link's click callback isn't. Offset right/down a
+            // little so the popup doesn't open directly under the cursor.
+            var clickPos = ImGui.GetMousePos();
+            ImGui.SetNextWindowPos(new Vector2(
+                clickPos.X + 12 * ImGuiHelpers.GlobalScale,
+                clickPos.Y + 8 * ImGuiHelpers.GlobalScale));
+            ImGui.OpenPopup(TravelPopupId);
+            _travelPopupNeedsOpen = false;
+        }
+
+        if (_pendingTravel is not { } pending)
+            return;
+
+        // A regular (non-modal) popup, not BeginPopupModal — a modal centers
+        // itself and dims the whole screen behind it regardless of
+        // SetNextWindowPos, which read as "fullscreen" for something this
+        // small; a plain popup stays where it's placed, has no dimming, and
+        // closes on its own if you click elsewhere instead of needing an
+        // explicit Cancel.
+        if (ImGui.BeginPopup(TravelPopupId, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.TextUnformatted($"Travel to {pending.World} ({pending.DataCenter}) to see this party?");
+            ImGui.Spacing();
+
+            if (ImGui.Button("Travel"))
+            {
+                // ProcessCommand only dispatches to plugin-registered
+                // commands (see OpenBlueMageSpellbook's comment above) and
+                // returns false silently if nothing owns "/li" — unlike
+                // actually typing it in the chat box, nothing shows up on
+                // screen in that case. Surface that ourselves so "no travel
+                // plugin installed" looks like an error instead of a dead
+                // click.
+                if (!Plugin.CommandManager.ProcessCommand($"/li {pending.DataCenter}"))
+                {
+                    Plugin.ChatGui.PrintError("/li command not found.");
+                }
+
+                _pendingTravel = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel"))
+            {
+                _pendingTravel = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
     }
 }

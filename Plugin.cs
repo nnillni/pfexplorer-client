@@ -32,6 +32,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ListingUploader _uploader;
     private readonly AlertPoller _alertPoller;
     private readonly PfScanTracker _scanTracker;
+    private readonly PfBackgroundScraper _backgroundScraper;
     private readonly MatchListView _matchListView;
     private readonly WindowSystem _windowSystem = new("PfExplorer");
     private readonly StatusWindow _statusWindow;
@@ -56,6 +57,7 @@ public sealed class Plugin : IDalamudPlugin
         _uploader = new ListingUploader(_config, Log);
         _alertPoller = new AlertPoller(_config, Log, ChatGui, ToastGui);
         _scanTracker = new PfScanTracker(_alertPoller, _uploader);
+        _backgroundScraper = new PfBackgroundScraper(_config, _alertPoller, _uploader);
         _matchListView = new MatchListView(_config, _alertPoller);
 
         // MatchesWindow (full) and MinimalMatchesWindow (compact) are the
@@ -68,7 +70,7 @@ public sealed class Plugin : IDalamudPlugin
         // since their constructors would otherwise need each other.
         _matchesWindow = new MatchesWindow(_matchListView);
         _minimalMatchesWindow = new MinimalMatchesWindow(_matchListView);
-        _statusWindow = new StatusWindow(_config, _uploader, _alertPoller, _matchesWindow, _minimalMatchesWindow);
+        _statusWindow = new StatusWindow(_config, _uploader, _alertPoller, _backgroundScraper, _matchesWindow, _minimalMatchesWindow);
         _matchesWindow.OnOpenOptions = () => _statusWindow.Toggle();
         _minimalMatchesWindow.OnOpenOptions = () => _statusWindow.Toggle();
         _matchesWindow.SwitchToMinimal = () => SetMinimalView(true);
@@ -89,6 +91,8 @@ public sealed class Plugin : IDalamudPlugin
         _windowSystem.AddWindow(_statusWindow);
 
         PartyFinderGui.ReceiveListing += OnReceiveListing;
+        PfListingOpener.OnCategoryRequested += OnCategoryRequested;
+        PfListingOpener.OnListingOpenFailed += OnListingOpenFailed;
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -106,22 +110,55 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += _windowSystem.Draw;
         PluginInterface.UiBuilder.Draw += TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw += _scanTracker.Tick;
+        PluginInterface.UiBuilder.Draw += _backgroundScraper.Tick;
         PluginInterface.UiBuilder.Draw += TrackStatusWindowTransitions;
+        PluginInterface.UiBuilder.Draw += PfListingOpener.DrawTravelConfirmation;
+        PluginInterface.UiBuilder.Draw += PfListingOpener.CheckPendingDetailOpen;
         PluginInterface.UiBuilder.OpenConfigUi += _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi += ToggleActiveMatchesWindow;
 
         Log.Information("PfExplorer loaded.");
     }
 
+    // A listing click's RequestCategoryListings already happened by the
+    // time this fires (see PfListingOpener.Open) — this only starts
+    // PfBackgroundScraper tracking its result, so it shows up in the Debug
+    // tab's scan log the same way a scheduled background step does.
+    private void OnCategoryRequested(byte category, string label) =>
+        _backgroundScraper.RecordManualRequest(category, label);
+
+    // A click's detail popup never actually opened (see
+    // PfListingOpener.CheckPendingDetailOpen) — strong enough evidence the
+    // listing's already gone that it's worth fixing the results list right
+    // away instead of waiting on the background re-scan CheckPendingDetailOpen
+    // also fires to independently confirm it.
+    private void OnListingOpenFailed(string listingId) =>
+        _alertPoller.RemoveListingLocally(listingId);
+
     private void OnReceiveListing(IPartyFinderListing listing, IPartyFinderListingEventArgs _)
     {
         var dto = ListingMapper.Map(listing);
 
         // Fed regardless of the Enabled/private checks below — this feeds
-        // both PfScanTracker's stale-match pruning and (via RefreshFromScan
-        // just below) the alert pipeline's local ground truth, neither of
-        // which are the upload path.
-        _scanTracker.NotifyListingReceived(dto);
+        // both PfScanTracker's and PfBackgroundScraper's stale-match
+        // pruning/scan-log bookkeeping, plus (via RefreshFromScan just
+        // below) the alert pipeline's local ground truth — none of which
+        // are the upload path.
+        //
+        // _scanTracker only gets listings while PfBackgroundScraper has no
+        // sample in flight (HasPendingSample) — a listing arriving mid-
+        // sample could be from that pending request rather than organic
+        // browsing, and PfScanTracker's own batch has no way to tell the
+        // difference. Feeding it in anyway let a scraper request's own
+        // listings get folded into whatever batch PfScanTracker was
+        // building, snapshotted against a CategoryTab that no longer
+        // matched the batch's actual (now mixed) contents — the exact
+        // mechanism behind real listings vanishing when an unrelated
+        // category got scanned. PfBackgroundScraper's own pruning already
+        // covers whatever IT requested, so skipping here costs nothing.
+        if (!_backgroundScraper.HasPendingSample)
+            _scanTracker.NotifyListingReceived(dto);
+        _backgroundScraper.NotifyListingReceived(dto);
 
         // Also unconditional: without this, a listing you were staring at
         // in the native PF window could still get announced "gone" by
@@ -241,10 +278,15 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw -= _windowSystem.Draw;
         PluginInterface.UiBuilder.Draw -= TryInitializeDefaults;
         PluginInterface.UiBuilder.Draw -= _scanTracker.Tick;
+        PluginInterface.UiBuilder.Draw -= _backgroundScraper.Tick;
         PluginInterface.UiBuilder.Draw -= TrackStatusWindowTransitions;
+        PluginInterface.UiBuilder.Draw -= PfListingOpener.DrawTravelConfirmation;
+        PluginInterface.UiBuilder.Draw -= PfListingOpener.CheckPendingDetailOpen;
         PluginInterface.UiBuilder.OpenConfigUi -= _statusWindow.Toggle;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleActiveMatchesWindow;
         PartyFinderGui.ReceiveListing -= OnReceiveListing;
+        PfListingOpener.OnCategoryRequested -= OnCategoryRequested;
+        PfListingOpener.OnListingOpenFailed -= OnListingOpenFailed;
 
         CommandManager.RemoveHandler(CommandName);
         CommandManager.RemoveHandler(CommandNameShort);

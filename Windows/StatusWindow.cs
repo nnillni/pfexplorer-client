@@ -37,6 +37,7 @@ public class StatusWindow : Window, IDisposable
     private readonly Configuration _config;
     private readonly ListingUploader _uploader;
     private readonly AlertPoller _alertPoller;
+    private readonly PfBackgroundScraper _backgroundScraper;
     private readonly MatchesWindow _matchesWindow;
     private readonly MinimalMatchesWindow _minimalMatchesWindow;
 
@@ -52,13 +53,14 @@ public class StatusWindow : Window, IDisposable
     public bool ForceFirstTabOnNextDraw { get; set; }
 
     public StatusWindow(
-        Configuration config, ListingUploader uploader, AlertPoller alertPoller,
+        Configuration config, ListingUploader uploader, AlertPoller alertPoller, PfBackgroundScraper backgroundScraper,
         MatchesWindow matchesWindow, MinimalMatchesWindow minimalMatchesWindow)
         : base("PF Explorer Options##pfexplorer-status")
     {
         _config = config;
         _uploader = uploader;
         _alertPoller = alertPoller;
+        _backgroundScraper = backgroundScraper;
         _matchesWindow = matchesWindow;
         _minimalMatchesWindow = minimalMatchesWindow;
         _serverUrlBuffer = config.ServerUrl;
@@ -211,6 +213,7 @@ public class StatusWindow : Window, IDisposable
         _config.AlertPartyChangeColor = defaults.AlertPartyChangeColor;
         _config.AlertRemovedColor = defaults.AlertRemovedColor;
         _config.AlertHideDescription = defaults.AlertHideDescription;
+        _config.AlertBackgroundScraperEnabled = defaults.AlertBackgroundScraperEnabled;
 
         _config.Save();
         _alertPoller.ResetBaseline();
@@ -225,6 +228,30 @@ public class StatusWindow : Window, IDisposable
             _config.Enabled = enabled;
             _config.Save();
         }
+
+        var backgroundScraperEnabled = _config.AlertBackgroundScraperEnabled;
+        if (ImGui.Checkbox("Scan Party Finder in the background", ref backgroundScraperEnabled))
+        {
+            _config.AlertBackgroundScraperEnabled = backgroundScraperEnabled;
+            _config.Save();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Periodically checks every Party Finder category and uploads whatever it finds, "
+                + "roughly every 2 minutes — spread out randomly (not evenly, at least 2s apart) "
+                + "across that window, in a random order each time, and skips categories that "
+                + "were empty last time most (not all) of the time. Pauses automatically while "
+                + "you're in a duty, between zones, or otherwise unable to open Party Finder "
+                + "yourself anyway. Runs even if you never open the window yourself.");
+        }
+        ImGui.SameLine();
+        // Unlike every other capture path here, this one calls the game's
+        // own PF search function on a timer with no PF window ever open —
+        // real traffic no normal play would generate. Same red used for
+        // errors/zero-count warnings elsewhere in this window.
+        using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f)))
+            ImGui.TextUnformatted("(use at your own risk)");
 
         ImGui.Spacing();
         ImGui.Separator();
@@ -260,10 +287,10 @@ public class StatusWindow : Window, IDisposable
     }
 
     // Answers "is RequestCategoryListings actually giving us everything, or
-    // just one page?" — reads the same native fields/nodes PfListingOpener
-    // touches, straight off AgentLookingForGroup and the native
-    // LookingForGroup addon (if it happens to be open), so you can see what
-    // the last "All" request actually populated without guessing.
+    // just one page?" — reads the same native fields/nodes PfBackgroundScraper
+    // and PfListingOpener touch, straight off AgentLookingForGroup and the
+    // native LookingForGroup addon (if it happens to be open), so you can see
+    // what the last "All" request actually populated without guessing.
     private unsafe void DrawDebugTab()
     {
         ImGui.TextWrapped("Diagnostic view of the native PF agent/addon state — used to check how many results a RequestCategoryListings(\"All\") call actually returns per page.");
@@ -279,6 +306,11 @@ public class StatusWindow : Window, IDisposable
         // renders, without waiting for one to happen.
         if (ImGui.Button("Test all 3 announcement types"))
             _alertPoller.TestAllAnnouncements();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+        DrawScanLog();
 
         ImGui.Spacing();
         ImGui.Separator();
@@ -316,6 +348,30 @@ public class StatusWindow : Window, IDisposable
         var pageText = addon->CurrentPageTextNode != null ? addon->CurrentPageTextNode->NodeText.ToString() : "(none)";
         ImGui.TextUnformatted($"ResultsCountTextNode: {resultsText}");
         ImGui.TextUnformatted($"CurrentPageTextNode: {pageText}");
+    }
+
+    // One line per background scan (most recent first) — timestamp plus
+    // however many listing IDs Listings.ListingIds actually held ~1.5s
+    // after the request, sampled by PfBackgroundScraper itself. Answers
+    // "is that count ever capped at some fixed number regardless of how
+    // much is actually out there" without needing to eyeball the addon's
+    // text nodes scan-by-scan.
+    private void DrawScanLog()
+    {
+        ImGui.TextUnformatted("Background scan log");
+        ImGui.TextDisabled("  Command sent, how many ReceiveListing events actually fired ~1.5s afterward, and the first one's name");
+
+        if (_backgroundScraper.History.Count == 0)
+        {
+            ImGui.TextDisabled("  (no scans yet)");
+            return;
+        }
+
+        foreach (var scan in _backgroundScraper.History)
+        {
+            var firstNameText = string.IsNullOrEmpty(scan.FirstListingName) ? "(none)" : scan.FirstListingName;
+            ImGui.TextUnformatted($"  {scan.At.ToLocalTime():HH:mm:ss} — {scan.Command} — {scan.Count} listings — first: {firstNameText}");
+        }
     }
 
     // Prints one chat line per UIColor sheet row, each colored via that

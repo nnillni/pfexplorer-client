@@ -90,20 +90,63 @@ public sealed class PfScanTracker
         _uploader = uploader;
     }
 
+    // Snapshotted from AgentLookingForGroup.CategoryTab the moment a new
+    // batch starts (see NotifyListingReceived) — NOT read fresh in Tick()
+    // once the batch settles. CategoryTab is a single mutable field that
+    // moves with every RequestCategoryListings call; PfBackgroundScraper
+    // fires a new one roughly every 2+ seconds, well inside this class's
+    // own 800ms debounce window. Reading it at settle time meant a batch
+    // that was actually still-arriving Trials data could get read against
+    // CategoryTab AFTER a later HighEndDuty request had already moved it to
+    // 6 — misattributing the whole Trials batch as "the complete HighEndDuty
+    // page" and pruning every real Trials match as missing. Snapshotting at
+    // batch-start ties the category to whatever request was actually most
+    // recently active when these listings started arriving, which is far
+    // less likely to have already been superseded.
+    private byte? _pendingTab;
+
+    // Set if CategoryTab is ever seen to differ from _pendingTab before the
+    // batch settles — i.e. the tab changed again while this batch's
+    // response was still streaming in, not just before it started. That can
+    // happen switching tabs fast enough that the game hasn't finished
+    // sending the first tab's own results yet: the batch that eventually
+    // settles is then a truncated slice of the first tab mixed with however
+    // much of the next one(s) arrived before DebounceWindow's gap, not a
+    // clean, complete page for anything. Trusting batch.Count < 50 alone
+    // there would read as "a small, complete page" and wrongly prune real,
+    // still-active listings from the first tab that just hadn't arrived yet
+    // when the switch happened. Tick() skips pruning entirely when this is
+    // set, same safe-fallback treatment as an unrecognized tab or an
+    // unavailable agent.
+    private bool _pendingTabMixed;
+
     // Called from Plugin.OnReceiveListing for every listing the game hands
     // back, regardless of source — the only thing that ever adds to the
     // pending batch, so this class never sees a listing it wasn't already
     // being fed anyway.
-    public void NotifyListingReceived(PfListingDto dto)
+    public unsafe void NotifyListingReceived(PfListingDto dto)
     {
+        var agent = AgentLookingForGroup.Instance();
+        var currentTab = agent != null ? agent->CategoryTab : (byte?)null;
+
+        if (_pending.Count == 0)
+        {
+            _pendingTab = currentTab;
+            _pendingTabMixed = false;
+        }
+        else if (currentTab != _pendingTab)
+        {
+            _pendingTabMixed = true;
+        }
+
         _pending.Add(dto);
         _lastReceivedAt = DateTime.UtcNow;
     }
 
     // Pumped from Plugin's Draw hook every frame — cheap when idle (a date
     // check), and never issues a game request itself; it only ever reads
-    // AgentLookingForGroup.CategoryTab to find out which tab you were
-    // already looking at.
+    // _pendingTab (see its own doc comment) to find out which tab this
+    // batch actually belongs to.
     public unsafe void Tick()
     {
         if (_pending.Count == 0 || _lastReceivedAt is not { } lastReceivedAt)
@@ -115,6 +158,10 @@ public sealed class PfScanTracker
         var batch = _pending.ToList();
         _pending.Clear();
         _lastReceivedAt = null;
+        var tab = _pendingTab;
+        var tabMixed = _pendingTabMixed;
+        _pendingTab = null;
+        _pendingTabMixed = false;
 
         var localDataCenter = MatchListView.GetLocalDataCenter();
         if (localDataCenter == null)
@@ -123,10 +170,16 @@ public sealed class PfScanTracker
         if (batch.Count >= MaxListingsPerPage)
             return;
 
-        var agent = AgentLookingForGroup.Instance();
-        if (agent == null)
+        // See _pendingTabMixed's own doc comment — a batch that isn't
+        // cleanly attributable to one tab for its whole duration isn't a
+        // complete, trustworthy page for pruning purposes, regardless of
+        // how small it ended up.
+        if (tabMixed)
             return;
-        if (!ExpectedBucketsByTab.TryGetValue(agent->CategoryTab, out var expected))
+
+        if (tab is not { } tabValue)
+            return;
+        if (!ExpectedBucketsByTab.TryGetValue(tabValue, out var expected))
             return;
 
         var buckets = new HashSet<string>(expected);

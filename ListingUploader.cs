@@ -103,9 +103,21 @@ public sealed class ListingUploader : IDisposable
     // marked expired for every other client's poll too instead of just this
     // one's local Matches. Fire-and-forget, same reasoning as FlushAsync
     // being timer- rather than await-driven.
+    //
+    // Deliberately NOT gated on _config.Enabled like FlushAsync is —
+    // AlertPoller's own top comment documents alerts as independent of that
+    // toggle ("you might want alerts without contributing capture data"),
+    // but this used to silently no-op whenever it was off. That meant every
+    // confirmed-gone listing from a capture-disabled, alerts-only client
+    // never reached the server at all: the correction just evaporated, and
+    // the server (and everyone else's poll, and the website) kept serving
+    // that listing indefinitely since nothing ever told it otherwise.
+    // Reporting "this is gone" isn't contributing new capture data the way
+    // FlushAsync's own uploads are — it's correcting the shared index — so
+    // it shouldn't share that gate.
     public async Task ExpireAsync(IReadOnlyList<string> listingIds)
     {
-        if (!_config.Enabled || listingIds.Count == 0)
+        if (listingIds.Count == 0)
             return;
 
         try
